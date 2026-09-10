@@ -1,0 +1,10 @@
+{
+  "description": "This web application streamlines data analysis and visualization for businesses, enabling informed decision-making through intuitive insights and reports.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

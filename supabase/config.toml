@@ -1,0 +1,100 @@
+# =========================================================
+# SUPABASE CONFIGURATION
+# Xyphora Prime Management System
+# =========================================================
+
+
+# =========================================================
+# DOCUMENT UPLOAD COMPLETE
+# =========================================================
+
+[functions.document-upload-complete]
+enabled = true
+verify_jwt = false
+import_map = "./functions/document-upload-complete/deno.json"
+entrypoint = "./functions/document-upload-complete/index.ts"
+
+
+# =========================================================
+# PROFILE AVATAR UPLOAD
+# =========================================================
+#
+# JWT verification is handled inside the Edge Function.
+# This allows the browser OPTIONS/CORS preflight request
+# to reach the function instead of being rejected by the
+# Supabase gateway with HTTP 401.
+#
+# The function MUST still verify the Authorization header
+# and authenticated Supabase user before allowing upload.
+#
+
+[functions.r2-profile-upload]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/r2-profile-upload/index.ts"
+
+
+# =========================================================
+# PROFILE AVATAR URL
+# =========================================================
+#
+# This function returns a signed/private URL for the
+# authenticated user's profile image.
+#
+
+[functions.r2-profile-url]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/r2-profile-url/index.ts"
+
+
+# =========================================================
+# PROFILE AVATAR DELETE
+# =========================================================
+#
+# This section is enabled because the
+# r2-profile-delete Edge Function is expected to exist:
+#
+# supabase/functions/r2-profile-delete/index.ts
+#
+# If that folder/function does not exist in your project,
+# remove this entire section until the function is created.
+#
+
+[functions.r2-profile-delete]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/r2-profile-delete/index.ts"
+
+
+# =========================================================
+# EMPLOYEE AVATAR UPLOAD
+# =========================================================
+#
+# Handles employee profile image uploads to the private
+# Cloudflare R2 bucket.
+#
+# JWT verification is intentionally handled inside the
+# Edge Function so browser CORS preflight requests can
+# reach the function.
+#
+# The function itself verifies:
+#   1. Authorization header
+#   2. Authenticated Supabase user
+#   3. Active profile
+#   4. Admin / Manager / Accountant permission
+#   5. Employee record
+#   6. Image type
+#   7. Maximum image size
+#
+# The R2 object key is stored in:
+#
+# employees.avatar_url
+#
+# The R2 bucket remains private.
+#
+
+[functions.r2-employee-upload]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/r2-employee-upload/index.ts"
