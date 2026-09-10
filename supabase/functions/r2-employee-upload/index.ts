@@ -8,9 +8,9 @@ import {
 
 import { createClient } from "npm:@supabase/supabase-js@2"
 
-/* -------------------------------------------------------------------------- */
-/* Environment                                                                */
-/* -------------------------------------------------------------------------- */
+/* ==========================================================================
+   ENVIRONMENT
+   ========================================================================== */
 
 const SUPABASE_URL =
   Deno.env.get("SUPABASE_URL") ?? ""
@@ -21,76 +21,154 @@ const SUPABASE_ANON_KEY =
   ""
 
 const SUPABASE_SERVICE_ROLE_KEY =
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SECRET_KEY") ??
+  Deno.env.get(
+    "SUPABASE_SERVICE_ROLE_KEY",
+  ) ??
+  Deno.env.get(
+    "SUPABASE_SECRET_KEY",
+  ) ??
   ""
 
 const R2_ACCOUNT_ID =
   Deno.env.get("R2_ACCOUNT_ID") ?? ""
 
 const R2_ACCESS_KEY_ID =
-  Deno.env.get("R2_ACCESS_KEY_ID") ?? ""
+  Deno.env.get(
+    "R2_ACCESS_KEY_ID",
+  ) ?? ""
 
 const R2_SECRET_ACCESS_KEY =
-  Deno.env.get("R2_SECRET_ACCESS_KEY") ?? ""
+  Deno.env.get(
+    "R2_SECRET_ACCESS_KEY",
+  ) ?? ""
 
 const R2_BUCKET_NAME =
-  Deno.env.get("R2_BUCKET_NAME") ??
+  Deno.env.get(
+    "R2_BUCKET_NAME",
+  ) ??
   "xyphora-prime-documents"
 
 const R2_ENDPOINT =
-  Deno.env.get("R2_ENDPOINT") ||
-  (R2_ACCOUNT_ID
-    ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
-    : "")
+  Deno.env.get(
+    "R2_ENDPOINT",
+  ) ||
+  (
+    R2_ACCOUNT_ID
+      ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
+      : ""
+  )
 
 const R2_ORGANIZATION_ID =
-  Deno.env.get("R2_ORGANIZATION_ID") ??
+  Deno.env.get(
+    "R2_ORGANIZATION_ID",
+  ) ??
   "default"
 
-/* -------------------------------------------------------------------------- */
-/* CORS                                                                       */
-/* -------------------------------------------------------------------------- */
+/* ==========================================================================
+   CORS
+   ========================================================================== */
+
+/*
+ * IMPORTANT:
+ *
+ * Your production frontend is:
+ *
+ * https://www.xyphoraprimemanagement.com
+ *
+ * This exact origin must be allowed.
+ *
+ * We also support:
+ *
+ * https://xyphoraprimemanagement.com
+ * http://localhost:5173
+ * https://localhost:5173
+ * http://localhost:8443
+ * https://localhost:8443
+ *
+ * Additional origins can be supplied through:
+ *
+ * CORS_ORIGINS
+ *
+ * Example:
+ *
+ * CORS_ORIGINS=https://example.com,https://another.com
+ */
 
 const configuredOrigins = (
-  Deno.env.get("CORS_ORIGINS") ?? ""
+  Deno.env.get(
+    "CORS_ORIGINS",
+  ) ?? ""
 )
   .split(",")
-  .map((origin) => origin.trim())
+  .map(
+    (origin) =>
+      origin.trim(),
+  )
   .filter(Boolean)
 
-const allowedOrigins = new Set([
-  "http://localhost:8443",
-  "https://localhost:8443",
-  "http://localhost:5173",
-  "https://localhost:5173",
-  ...configuredOrigins,
-])
+const allowedOrigins =
+  new Set<string>([
+    "https://www.xyphoraprimemanagement.com",
+    "https://xyphoraprimemanagement.com",
 
-function corsHeaders(
+    "http://localhost:5173",
+    "https://localhost:5173",
+
+    "http://localhost:8443",
+    "https://localhost:8443",
+
+    ...configuredOrigins,
+  ])
+
+/* --------------------------------------------------------------------------
+   Get CORS headers
+   -------------------------------------------------------------------------- */
+
+function getCorsHeaders(
   request: Request,
 ): HeadersInit {
   const origin =
-    request.headers.get("Origin") ?? ""
+    request.headers.get(
+      "Origin",
+    )
 
   const headers: HeadersInit = {
     "Access-Control-Allow-Headers":
       "authorization, x-client-info, apikey, content-type",
+
     "Access-Control-Allow-Methods":
       "POST, OPTIONS",
-    "Access-Control-Max-Age": "86400",
-    "Vary": "Origin",
+
+    "Access-Control-Max-Age":
+      "86400",
+
+    "Vary":
+      "Origin",
   }
 
-  if (allowedOrigins.has(origin)) {
-    headers["Access-Control-Allow-Origin"] =
-      origin
+  /*
+   * Only return the requesting origin when
+   * it is explicitly allowed.
+   */
+  if (
+    origin &&
+    allowedOrigins.has(
+      origin,
+    )
+  ) {
+    headers[
+      "Access-Control-Allow-Origin"
+    ] = origin
   }
 
   return headers
 }
 
-function response(
+/* ==========================================================================
+   RESPONSE HELPER
+   ========================================================================== */
+
+function jsonResponse(
   request: Request,
   body: unknown,
   status = 200,
@@ -99,8 +177,12 @@ function response(
     JSON.stringify(body),
     {
       status,
+
       headers: {
-        ...corsHeaders(request),
+        ...getCorsHeaders(
+          request,
+        ),
+
         "Content-Type":
           "application/json; charset=utf-8",
       },
@@ -108,10 +190,83 @@ function response(
   )
 }
 
-/* -------------------------------------------------------------------------- */
-/* Supabase                                                                   */
-/* -------------------------------------------------------------------------- */
+/* ==========================================================================
+   ENVIRONMENT VALIDATION
+   ========================================================================== */
 
+function validateEnvironment() {
+  const missing: string[] =
+    []
+
+  if (!SUPABASE_URL) {
+    missing.push(
+      "SUPABASE_URL",
+    )
+  }
+
+  if (!SUPABASE_ANON_KEY) {
+    missing.push(
+      "SUPABASE_ANON_KEY / SUPABASE_PUBLISHABLE_KEY",
+    )
+  }
+
+  if (
+    !SUPABASE_SERVICE_ROLE_KEY
+  ) {
+    missing.push(
+      "SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY",
+    )
+  }
+
+  if (!R2_ACCOUNT_ID) {
+    missing.push(
+      "R2_ACCOUNT_ID",
+    )
+  }
+
+  if (!R2_ACCESS_KEY_ID) {
+    missing.push(
+      "R2_ACCESS_KEY_ID",
+    )
+  }
+
+  if (!R2_SECRET_ACCESS_KEY) {
+    missing.push(
+      "R2_SECRET_ACCESS_KEY",
+    )
+  }
+
+  if (!R2_BUCKET_NAME) {
+    missing.push(
+      "R2_BUCKET_NAME",
+    )
+  }
+
+  if (!R2_ENDPOINT) {
+    missing.push(
+      "R2_ENDPOINT",
+    )
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required environment variables: ${missing.join(
+        ", ",
+      )}`,
+    )
+  }
+}
+
+/* ==========================================================================
+   SUPABASE CLIENTS
+   ========================================================================== */
+
+/**
+ * Creates a Supabase client using the user's
+ * Authorization header.
+ *
+ * This client is only used for authentication.
+ */
 function createUserClient(
   request: Request,
 ) {
@@ -130,6 +285,7 @@ function createUserClient(
             authorization,
         },
       },
+
       auth: {
         persistSession: false,
         autoRefreshToken: false,
@@ -138,6 +294,11 @@ function createUserClient(
   )
 }
 
+/**
+ * Creates a service-role Supabase client.
+ *
+ * NEVER expose this key to the frontend.
+ */
 function createAdminClient() {
   return createClient(
     SUPABASE_URL,
@@ -151,91 +312,51 @@ function createAdminClient() {
   )
 }
 
-/* -------------------------------------------------------------------------- */
-/* R2                                                                         */
-/* -------------------------------------------------------------------------- */
+/* ==========================================================================
+   R2 CLIENT
+   ========================================================================== */
 
 function createR2Client() {
   return new S3Client({
     region: "auto",
-    endpoint: R2_ENDPOINT,
+
+    endpoint:
+      R2_ENDPOINT,
+
     credentials: {
       accessKeyId:
         R2_ACCESS_KEY_ID,
+
       secretAccessKey:
         R2_SECRET_ACCESS_KEY,
     },
   })
 }
 
-/* -------------------------------------------------------------------------- */
-/* Constants                                                                  */
-/* -------------------------------------------------------------------------- */
+/* ==========================================================================
+   CONSTANTS
+   ========================================================================== */
 
 const MAX_FILE_SIZE =
   5 * 1024 * 1024
 
-const ALLOWED_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-])
+const ALLOWED_TYPES =
+  new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+  ])
 
-const ALLOWED_ROLES = new Set([
-  "admin",
-  "manager",
-  "accountant",
-])
+const ALLOWED_ROLES =
+  new Set([
+    "admin",
+    "manager",
+    "accountant",
+  ])
 
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
-
-function validateEnvironment() {
-  const missing: string[] = []
-
-  if (!SUPABASE_URL) {
-    missing.push("SUPABASE_URL")
-  }
-
-  if (!SUPABASE_ANON_KEY) {
-    missing.push(
-      "SUPABASE_ANON_KEY / SUPABASE_PUBLISHABLE_KEY",
-    )
-  }
-
-  if (!SUPABASE_SERVICE_ROLE_KEY) {
-    missing.push(
-      "SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY",
-    )
-  }
-
-  if (!R2_ACCOUNT_ID) {
-    missing.push("R2_ACCOUNT_ID")
-  }
-
-  if (!R2_ACCESS_KEY_ID) {
-    missing.push("R2_ACCESS_KEY_ID")
-  }
-
-  if (!R2_SECRET_ACCESS_KEY) {
-    missing.push("R2_SECRET_ACCESS_KEY")
-  }
-
-  if (!R2_BUCKET_NAME) {
-    missing.push("R2_BUCKET_NAME")
-  }
-
-  if (!R2_ENDPOINT) {
-    missing.push("R2_ENDPOINT")
-  }
-
-  if (missing.length) {
-    throw new Error(
-      `Missing required environment variables: ${missing.join(", ")}`,
-    )
-  }
-}
+/* ==========================================================================
+   AUTHENTICATION
+   ========================================================================== */
 
 async function authenticate(
   request: Request,
@@ -246,7 +367,8 @@ async function authenticate(
     )
 
   if (
-    !authorization?.startsWith(
+    !authorization ||
+    !authorization.startsWith(
       "Bearer ",
     )
   ) {
@@ -256,7 +378,9 @@ async function authenticate(
   }
 
   const client =
-    createUserClient(request)
+    createUserClient(
+      request,
+    )
 
   const {
     data,
@@ -264,7 +388,15 @@ async function authenticate(
   } =
     await client.auth.getUser()
 
-  if (error || !data.user) {
+  if (
+    error ||
+    !data.user
+  ) {
+    console.error(
+      "Authentication failed:",
+      error,
+    )
+
     throw new Error(
       "Invalid or expired authentication session.",
     )
@@ -272,6 +404,10 @@ async function authenticate(
 
   return data.user
 }
+
+/* ==========================================================================
+   AUTHORIZATION
+   ========================================================================== */
 
 async function authorize(
   userId: string,
@@ -288,7 +424,10 @@ async function authorize(
       .select(
         "id, role, status",
       )
-      .eq("id", userId)
+      .eq(
+        "id",
+        userId,
+      )
       .maybeSingle()
 
   if (error) {
@@ -310,16 +449,22 @@ async function authorize(
 
   if (
     profile.status &&
-    profile.status !== "Active"
+    profile.status !==
+      "Active"
   ) {
     throw new Error(
       "Your account is inactive.",
     )
   }
 
+  const role =
+    String(
+      profile.role,
+    )
+
   if (
     !ALLOWED_ROLES.has(
-      String(profile.role),
+      role,
     )
   ) {
     throw new Error(
@@ -329,6 +474,10 @@ async function authorize(
 
   return profile
 }
+
+/* ==========================================================================
+   EMPLOYEE
+   ========================================================================== */
 
 async function getEmployee(
   employeeId: string,
@@ -345,7 +494,10 @@ async function getEmployee(
       .select(
         "id, employee_id, full_name, avatar_url",
       )
-      .eq("id", employeeId)
+      .eq(
+        "id",
+        employeeId,
+      )
       .maybeSingle()
 
   if (error) {
@@ -367,6 +519,10 @@ async function getEmployee(
 
   return data
 }
+
+/* ==========================================================================
+   FILE HELPERS
+   ========================================================================== */
 
 function getExtension(
   file: File,
@@ -390,6 +546,10 @@ function getExtension(
   }
 }
 
+/* ==========================================================================
+   R2 OBJECT KEY
+   ========================================================================== */
+
 function createAvatarKey(
   employeeId: string,
   extension: string,
@@ -403,6 +563,10 @@ function createAvatarKey(
   ].join("/")
 }
 
+/* ==========================================================================
+   VALIDATE EMPLOYEE AVATAR KEY
+   ========================================================================== */
+
 function isEmployeeAvatarKey(
   key: string,
   employeeId: string,
@@ -410,8 +574,14 @@ function isEmployeeAvatarKey(
   const prefix =
     `organizations/${R2_ORGANIZATION_ID}/employees/${employeeId}/avatar-`
 
-  return key.startsWith(prefix)
+  return key.startsWith(
+    prefix,
+  )
 }
+
+/* ==========================================================================
+   DELETE R2 OBJECT
+   ========================================================================== */
 
 async function deleteR2Object(
   key: string,
@@ -421,34 +591,60 @@ async function deleteR2Object(
 
   await r2.send(
     new DeleteObjectCommand({
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
+      Bucket:
+        R2_BUCKET_NAME,
+
+      Key:
+        key,
     }),
   )
 }
 
-/* -------------------------------------------------------------------------- */
-/* Main                                                                       */
-/* -------------------------------------------------------------------------- */
+/* ==========================================================================
+   MAIN EDGE FUNCTION
+   ========================================================================== */
 
 Deno.serve(
   async (
     request: Request,
   ) => {
-    if (
-      request.method === "OPTIONS"
-    ) {
-      return new Response(null, {
-        status: 204,
-        headers:
-          corsHeaders(request),
-      })
-    }
+    /* ======================================================================
+       CORS PREFLIGHT
+
+       THIS MUST BE FIRST.
+
+       The browser sends OPTIONS before the actual POST because the request
+       contains Authorization and other non-simple headers.
+
+       We must answer OPTIONS without requiring authentication.
+       ====================================================================== */
 
     if (
-      request.method !== "POST"
+      request.method ===
+      "OPTIONS"
     ) {
-      return response(
+      return new Response(
+        null,
+        {
+          status: 204,
+
+          headers:
+            getCorsHeaders(
+              request,
+            ),
+        },
+      )
+    }
+
+    /* ======================================================================
+       METHOD
+       ====================================================================== */
+
+    if (
+      request.method !==
+      "POST"
+    ) {
+      return jsonResponse(
         request,
         {
           success: false,
@@ -460,23 +656,43 @@ Deno.serve(
     }
 
     try {
+      /* ====================================================================
+         ENVIRONMENT
+         ==================================================================== */
+
       validateEnvironment()
+
+      /* ====================================================================
+         AUTHENTICATION
+         ==================================================================== */
 
       const user =
         await authenticate(
           request,
         )
 
-      await authorize(user.id)
+      /* ====================================================================
+         AUTHORIZATION
+         ==================================================================== */
+
+      await authorize(
+        user.id,
+      )
+
+      /* ====================================================================
+         CONTENT TYPE
+         ==================================================================== */
 
       const contentType =
-        request.headers
-          .get("Content-Type")
-          ?.toLowerCase() ?? ""
+        (
+          request.headers.get(
+            "Content-Type",
+          ) ?? ""
+        ).toLowerCase()
 
-      /* -------------------------------------------------------------------- */
-      /* DELETE                                                               */
-      /* -------------------------------------------------------------------- */
+      /* ====================================================================
+         DELETE ACTION
+         ==================================================================== */
 
       if (
         contentType.includes(
@@ -490,7 +706,7 @@ Deno.serve(
           body?.action !==
           "delete"
         ) {
-          return response(
+          return jsonResponse(
             request,
             {
               success: false,
@@ -508,7 +724,7 @@ Deno.serve(
             : ""
 
         if (!employeeId) {
-          return response(
+          return jsonResponse(
             request,
             {
               success: false,
@@ -519,25 +735,41 @@ Deno.serve(
           )
         }
 
+        /* ------------------------------------------------------------------
+           Load employee
+           ------------------------------------------------------------------ */
+
         const employee =
           await getEmployee(
             employeeId,
           )
 
+        /* ------------------------------------------------------------------
+           Nothing to delete
+           ------------------------------------------------------------------ */
+
         if (
           !employee.avatar_url
         ) {
-          return response(
+          return jsonResponse(
             request,
             {
               success: true,
-              action: "deleted",
+              action:
+                "deleted",
               employee_id:
                 employeeId,
-              avatar_url: null,
+              avatar_url:
+                null,
             },
           )
         }
+
+        /* ------------------------------------------------------------------
+           Security check
+
+           Only delete files belonging to this employee.
+           ------------------------------------------------------------------ */
 
         if (
           !isEmployeeAvatarKey(
@@ -545,7 +777,12 @@ Deno.serve(
             employeeId,
           )
         ) {
-          return response(
+          console.error(
+            "Invalid employee avatar key:",
+            employee.avatar_url,
+          )
+
+          return jsonResponse(
             request,
             {
               success: false,
@@ -556,17 +793,20 @@ Deno.serve(
           )
         }
 
-        /*
-         * Delete R2 object.
-         */
+        /* ------------------------------------------------------------------
+           Delete from R2
+           ------------------------------------------------------------------ */
+
         try {
           await deleteR2Object(
             employee.avatar_url,
           )
-        } catch (error) {
+        } catch (
+          r2DeleteError
+        ) {
           console.error(
             "R2 delete failed:",
-            error,
+            r2DeleteError,
           )
 
           throw new Error(
@@ -574,9 +814,10 @@ Deno.serve(
           )
         }
 
-        /*
-         * Clear DB reference.
-         */
+        /* ------------------------------------------------------------------
+           Clear database
+           ------------------------------------------------------------------ */
+
         const client =
           createAdminClient()
 
@@ -589,7 +830,8 @@ Deno.serve(
           await client
             .from("employees")
             .update({
-              avatar_url: null,
+              avatar_url:
+                null,
             })
             .eq(
               "id",
@@ -611,30 +853,32 @@ Deno.serve(
           )
         }
 
-        return response(
+        return jsonResponse(
           request,
           {
             success: true,
-            action: "deleted",
+            action:
+              "deleted",
             employee:
               updatedEmployee,
             employee_id:
               employeeId,
-            avatar_url: null,
+            avatar_url:
+              null,
           },
         )
       }
 
-      /* -------------------------------------------------------------------- */
-      /* UPLOAD                                                               */
-      /* -------------------------------------------------------------------- */
+      /* ====================================================================
+         UPLOAD
+         ==================================================================== */
 
       if (
         !contentType.includes(
           "multipart/form-data",
         )
       ) {
-        return response(
+        return jsonResponse(
           request,
           {
             success: false,
@@ -644,6 +888,10 @@ Deno.serve(
           415,
         )
       }
+
+      /* --------------------------------------------------------------------
+         Read multipart form
+         -------------------------------------------------------------------- */
 
       const formData =
         await request.formData()
@@ -660,7 +908,7 @@ Deno.serve(
           : ""
 
       if (!employeeId) {
-        return response(
+        return jsonResponse(
           request,
           {
             success: false,
@@ -671,11 +919,19 @@ Deno.serve(
         )
       }
 
-      const file =
-        formData.get("file")
+      /* --------------------------------------------------------------------
+         Get file
+         -------------------------------------------------------------------- */
 
-      if (!(file instanceof File)) {
-        return response(
+      const file =
+        formData.get(
+          "file",
+        )
+
+      if (
+        !(file instanceof File)
+      ) {
+        return jsonResponse(
           request,
           {
             success: false,
@@ -686,8 +942,12 @@ Deno.serve(
         )
       }
 
+      /* --------------------------------------------------------------------
+         File size
+         -------------------------------------------------------------------- */
+
       if (file.size <= 0) {
-        return response(
+        return jsonResponse(
           request,
           {
             success: false,
@@ -702,7 +962,7 @@ Deno.serve(
         file.size >
         MAX_FILE_SIZE
       ) {
-        return response(
+        return jsonResponse(
           request,
           {
             success: false,
@@ -712,6 +972,10 @@ Deno.serve(
           400,
         )
       }
+
+      /* --------------------------------------------------------------------
+         File type
+         -------------------------------------------------------------------- */
 
       const fileType =
         file.type
@@ -723,7 +987,7 @@ Deno.serve(
           fileType,
         )
       ) {
-        return response(
+        return jsonResponse(
           request,
           {
             success: false,
@@ -734,14 +998,18 @@ Deno.serve(
         )
       }
 
-      /*
-       * Get employee before upload so we know
-       * whether an old avatar exists.
-       */
+      /* --------------------------------------------------------------------
+         Verify employee
+         -------------------------------------------------------------------- */
+
       const employee =
         await getEmployee(
           employeeId,
         )
+
+      /* --------------------------------------------------------------------
+         Create R2 object key
+         -------------------------------------------------------------------- */
 
       const extension =
         getExtension(file)
@@ -752,35 +1020,56 @@ Deno.serve(
           extension,
         )
 
+      /* --------------------------------------------------------------------
+         Read file
+         -------------------------------------------------------------------- */
+
       const fileBuffer =
         await file.arrayBuffer()
+
+      /* --------------------------------------------------------------------
+         R2 CLIENT
+         -------------------------------------------------------------------- */
 
       const r2 =
         createR2Client()
 
-      /*
-       * Upload new object.
-       */
+      /* --------------------------------------------------------------------
+         Upload new image
+         -------------------------------------------------------------------- */
+
       try {
         await r2.send(
           new PutObjectCommand({
             Bucket:
               R2_BUCKET_NAME,
-            Key: newKey,
-            Body: fileBuffer,
+
+            Key:
+              newKey,
+
+            Body:
+              new Uint8Array(
+                fileBuffer,
+              ),
+
             ContentType:
               fileType,
+
             CacheControl:
               "private, max-age=3600",
+
             Metadata: {
               "entity-type":
                 "employee-avatar",
+
               "employee-id":
                 employeeId,
             },
           }),
         )
-      } catch (uploadError) {
+      } catch (
+        uploadError
+      ) {
         console.error(
           "Employee avatar R2 upload failed:",
           uploadError,
@@ -791,9 +1080,10 @@ Deno.serve(
         )
       }
 
-      /*
-       * Update database.
-       */
+      /* --------------------------------------------------------------------
+         Update employee database record
+         -------------------------------------------------------------------- */
+
       const client =
         createAdminClient()
 
@@ -806,7 +1096,8 @@ Deno.serve(
         await client
           .from("employees")
           .update({
-            avatar_url: newKey,
+            avatar_url:
+              newKey,
           })
           .eq(
             "id",
@@ -817,10 +1108,13 @@ Deno.serve(
           )
           .single()
 
-      /*
-       * If DB update failed, remove the new
-       * object to avoid an orphaned file.
-       */
+      /* --------------------------------------------------------------------
+         Database failed
+
+         Remove newly uploaded R2 object so we don't leave
+         orphaned files.
+         -------------------------------------------------------------------- */
+
       if (updateError) {
         console.error(
           "Failed to update employee avatar_url:",
@@ -831,7 +1125,9 @@ Deno.serve(
           await deleteR2Object(
             newKey,
           )
-        } catch (cleanupError) {
+        } catch (
+          cleanupError
+        ) {
           console.error(
             "Failed to clean up new R2 object:",
             cleanupError,
@@ -843,10 +1139,13 @@ Deno.serve(
         )
       }
 
-      /*
-       * Delete previous avatar only after
-       * database update succeeds.
-       */
+      /* --------------------------------------------------------------------
+         Delete previous employee avatar
+
+         Only delete the previous image if it belongs to the same
+         employee's expected R2 path.
+         -------------------------------------------------------------------- */
+
       if (
         employee.avatar_url &&
         employee.avatar_url !==
@@ -860,12 +1159,14 @@ Deno.serve(
           await deleteR2Object(
             employee.avatar_url,
           )
-        } catch (oldDeleteError) {
+        } catch (
+          oldDeleteError
+        ) {
           /*
-           * The new image is already active.
+           * The new image is already active in the database.
            *
-           * Do not fail the request because
-           * an old object could not be removed.
+           * Do not fail the upload because cleanup of an old
+           * object failed.
            */
           console.error(
             "Failed to delete previous employee avatar:",
@@ -874,20 +1175,39 @@ Deno.serve(
         }
       }
 
-      return response(
+      /* ====================================================================
+         SUCCESS
+         ==================================================================== */
+
+      return jsonResponse(
         request,
         {
           success: true,
-          action: "uploaded",
+
+          action:
+            "uploaded",
+
           employee:
             updatedEmployee,
-          object_key: newKey,
-          avatar_url: newKey,
+
+          employee_id:
+            employeeId,
+
+          object_key:
+            newKey,
+
+          avatar_url:
+            newKey,
         },
+        200,
       )
     } catch (error) {
+      /* ====================================================================
+         ERROR
+         ==================================================================== */
+
       console.error(
-        "r2-employee-upload:",
+        "r2-employee-upload error:",
         error,
       )
 
@@ -907,10 +1227,15 @@ Deno.serve(
         ) ||
         message.includes(
           "expired",
+        ) ||
+        message.includes(
+          "Invalid or expired",
         )
       ) {
         status = 401
-      } else if (
+      }
+
+      if (
         message.includes(
           "permission",
         ) ||
@@ -921,11 +1246,12 @@ Deno.serve(
         status = 403
       }
 
-      return response(
+      return jsonResponse(
         request,
         {
           success: false,
-          error: message,
+          error:
+            message,
         },
         status,
       )
