@@ -1,5 +1,5 @@
-
 import { useEffect, useState } from 'react'
+
 import {
   Building2,
   FileText,
@@ -26,6 +26,10 @@ import {
 
 import type { CompanySettings } from '../../types'
 
+/* ==========================================================================
+   TYPES
+   ========================================================================== */
+
 type Tab =
   | 'general'
   | 'company'
@@ -38,6 +42,10 @@ type Tab =
   | 'backup'
 
 type SettingsForm = CompanySettings
+
+/* ==========================================================================
+   TABS
+   ========================================================================== */
 
 const tabs: {
   key: Tab
@@ -91,41 +99,67 @@ const tabs: {
   },
 ]
 
-const createEmptySettings = (): SettingsForm => ({
-  company_name: '',
-  registration_number: '',
-  address: '',
-  phone: '',
-  email: '',
-  website: '',
+/* ==========================================================================
+   DEFAULT SETTINGS
+   ========================================================================== */
 
-  bank_name: '',
-  bank_account: '',
-  bank_branch: '',
+const createEmptySettings =
+  (): SettingsForm => ({
+    company_name: '',
+    registration_number: '',
+    address: '',
+    phone: '',
+    email: '',
+    website: '',
 
-  invoice_prefix: 'XP-INV',
-  invoice_starting_number: 1,
-  default_payment_terms: '',
-  default_notes: '',
-  terms_and_conditions: '',
-  invoice_footer: '',
+    bank_name: '',
+    bank_account: '',
+    bank_branch: '',
 
-  currency: 'LKR',
-  currency_symbol: 'LKR',
-  opening_balance: 0,
-  financial_year_start: '01-01',
+    invoice_prefix: 'XP-INV',
+    invoice_starting_number: 1,
 
-  timezone: 'Asia/Colombo',
-  date_format: 'DD MMM YYYY',
+    default_payment_terms: '',
+    default_notes: '',
+    terms_and_conditions: '',
+    invoice_footer: '',
 
-  // VAT / Tax
-  vat_number: '',
-  default_vat_rate: 0,
-  vat_enabled: false,
-})
+    currency: 'LKR',
+    currency_symbol: 'LKR',
+
+    opening_balance: 0,
+
+    /*
+     * IMPORTANT:
+     *
+     * company_settings.financial_year_start
+     * is stored as MM-DD.
+     *
+     * Default:
+     * January 1
+     */
+    financial_year_start: '01-01',
+
+    timezone: 'Asia/Colombo',
+    date_format: 'DD MMM YYYY',
+
+    /*
+     * VAT / Tax
+     */
+    vat_number: '',
+    default_vat_rate: 0,
+    vat_enabled: false,
+  })
+
+/* ==========================================================================
+   GENERAL HELPERS
+   ========================================================================== */
 
 const normalize = (
-  value: string | null | undefined,
+  value:
+    | string
+    | null
+    | undefined,
 ): string => {
   return value?.trim() || ''
 }
@@ -137,6 +171,189 @@ const isValidEmail = (
     value,
   )
 }
+
+/* ==========================================================================
+   FINANCIAL YEAR START
+   ========================================================================== */
+
+/**
+ * Converts supported values to the database format:
+ *
+ * MM-DD
+ *
+ * Supported input:
+ *
+ * 01-01
+ * 04-01
+ * 2026-01-01
+ * 2026-04-01
+ */
+const normalizeFinancialYearStart = (
+  value:
+    | string
+    | null
+    | undefined,
+): string => {
+  const trimmed =
+    normalize(value)
+
+  if (!trimmed) {
+    throw new Error(
+      'Financial year start is required.',
+    )
+  }
+
+  /*
+   * ----------------------------------------------------------
+   * Already MM-DD
+   * ----------------------------------------------------------
+   */
+
+  if (
+    /^\d{2}-\d{2}$/.test(
+      trimmed,
+    )
+  ) {
+    const [
+      month,
+      day,
+    ] = trimmed
+      .split('-')
+      .map(Number)
+
+    /*
+     * Use leap year 2000 so February 29 is
+     * considered a valid calendar date.
+     */
+    const date = new Date(
+      2000,
+      month - 1,
+      day,
+    )
+
+    if (
+      date.getFullYear() !==
+        2000 ||
+      date.getMonth() !==
+        month - 1 ||
+      date.getDate() !==
+        day
+    ) {
+      throw new Error(
+        'Financial year start is invalid.',
+      )
+    }
+
+    return trimmed
+  }
+
+  /*
+   * ----------------------------------------------------------
+   * YYYY-MM-DD
+   * ----------------------------------------------------------
+   *
+   * This handles an existing database/UI value such as:
+   *
+   * 2026-01-01
+   *
+   * and converts it to:
+   *
+   * 01-01
+   */
+
+  if (
+    /^\d{4}-\d{2}-\d{2}$/.test(
+      trimmed,
+    )
+  ) {
+    const year =
+      Number(
+        trimmed.slice(0, 4),
+      )
+
+    const month =
+      Number(
+        trimmed.slice(5, 7),
+      )
+
+    const day =
+      Number(
+        trimmed.slice(8, 10),
+      )
+
+    /*
+     * Validate month/day using the supplied year.
+     */
+    const date = new Date(
+      year,
+      month - 1,
+      day,
+    )
+
+    if (
+      date.getFullYear() !==
+        year ||
+      date.getMonth() !==
+        month - 1 ||
+      date.getDate() !==
+        day
+    ) {
+      throw new Error(
+        'Financial year start is invalid.',
+      )
+    }
+
+    return `${String(
+      month,
+    ).padStart(2, '0')}-${String(
+      day,
+    ).padStart(2, '0')}`
+  }
+
+  throw new Error(
+    'Financial year start must use MM-DD format, for example 01-01.',
+  )
+}
+
+/**
+ * Normalizes the financial year value when loading
+ * existing data into the form.
+ *
+ * This prevents an old YYYY-MM-DD value from appearing
+ * in the page and then being sent back incorrectly.
+ */
+const normalizeLoadedFinancialYearStart =
+  (
+    value:
+      | string
+      | null
+      | undefined,
+  ): string => {
+    const trimmed =
+      normalize(value)
+
+    if (!trimmed) {
+      return '01-01'
+    }
+
+    try {
+      return normalizeFinancialYearStart(
+        trimmed,
+      )
+    } catch {
+      /*
+       * Don't break the entire Settings page because
+       * of an invalid old value.
+       *
+       * Keep the database-compatible default in the form.
+       */
+      return '01-01'
+    }
+  }
+
+/* ==========================================================================
+   COMPONENT
+   ========================================================================== */
 
 export default function SettingsPage() {
   const {
@@ -160,24 +377,35 @@ export default function SettingsPage() {
   const [saving, setSaving] =
     useState(false)
 
-  /*
-   * Synchronize local form with the
-   * actual company_settings data.
-   */
+  /* ==========================================================================
+     LOAD SETTINGS
+     ========================================================================== */
+
   useEffect(() => {
     if (!settings) {
       return
     }
 
+    /*
+     * Build the form from the actual database settings.
+     *
+     * Financial year is explicitly normalized to MM-DD.
+     */
     setForm({
       ...createEmptySettings(),
       ...settings,
+
+      financial_year_start:
+        normalizeLoadedFinancialYearStart(
+          settings.financial_year_start,
+        ),
     })
   }, [settings])
 
-  /*
-   * Fully typed form updater.
-   */
+  /* ==========================================================================
+     FORM UPDATE
+     ========================================================================== */
+
   const updateForm = <
     K extends keyof SettingsForm,
   >(
@@ -190,12 +418,21 @@ export default function SettingsPage() {
     }))
   }
 
-  /*
-   * Save settings through DataContext.
-   */
+  /* ==========================================================================
+     SAVE
+     ========================================================================== */
+
   const handleSave = async () => {
+    /*
+     * ----------------------------------------------------------
+     * TEXT VALUES
+     * ----------------------------------------------------------
+     */
+
     const companyName =
-      normalize(form.company_name)
+      normalize(
+        form.company_name,
+      )
 
     const registrationNumber =
       normalize(
@@ -224,7 +461,9 @@ export default function SettingsPage() {
       normalize(form.bank_branch)
 
     const invoicePrefix =
-      normalize(form.invoice_prefix)
+      normalize(
+        form.invoice_prefix,
+      )
 
     const defaultPaymentTerms =
       normalize(
@@ -232,7 +471,9 @@ export default function SettingsPage() {
       )
 
     const defaultNotes =
-      normalize(form.default_notes)
+      normalize(
+        form.default_notes,
+      )
 
     const termsAndConditions =
       normalize(
@@ -240,7 +481,9 @@ export default function SettingsPage() {
       )
 
     const invoiceFooter =
-      normalize(form.invoice_footer)
+      normalize(
+        form.invoice_footer,
+      )
 
     const currency =
       normalize(form.currency)
@@ -250,20 +493,20 @@ export default function SettingsPage() {
         form.currency_symbol,
       )
 
-    const financialYearStart =
-      normalize(
-        form.financial_year_start,
-      )
-
     const timezone =
       normalize(form.timezone)
 
     const dateFormat =
-      normalize(form.date_format)
+      normalize(
+        form.date_format,
+      )
 
     /*
-     * Required company information.
+     * ----------------------------------------------------------
+     * REQUIRED COMPANY INFORMATION
+     * ----------------------------------------------------------
      */
+
     if (!companyName) {
       error(
         'Company name is required.',
@@ -272,8 +515,11 @@ export default function SettingsPage() {
     }
 
     /*
-     * Optional email validation.
+     * ----------------------------------------------------------
+     * EMAIL
+     * ----------------------------------------------------------
      */
+
     if (
       email &&
       !isValidEmail(email)
@@ -285,8 +531,11 @@ export default function SettingsPage() {
     }
 
     /*
-     * Invoice validation.
+     * ----------------------------------------------------------
+     * INVOICE
+     * ----------------------------------------------------------
      */
+
     if (!invoicePrefix) {
       error(
         'Invoice prefix is required.',
@@ -294,9 +543,10 @@ export default function SettingsPage() {
       return
     }
 
-    const startingNumber = Number(
-      form.invoice_starting_number,
-    )
+    const startingNumber =
+      Number(
+        form.invoice_starting_number,
+      )
 
     if (
       !Number.isInteger(
@@ -311,11 +561,15 @@ export default function SettingsPage() {
     }
 
     /*
-     * Financial validation.
+     * ----------------------------------------------------------
+     * FINANCIAL
+     * ----------------------------------------------------------
      */
-    const openingBalance = Number(
-      form.opening_balance,
-    )
+
+    const openingBalance =
+      Number(
+        form.opening_balance,
+      )
 
     if (
       !Number.isFinite(
@@ -343,8 +597,11 @@ export default function SettingsPage() {
     }
 
     /*
-     * General preferences validation.
+     * ----------------------------------------------------------
+     * GENERAL
+     * ----------------------------------------------------------
      */
+
     if (!timezone) {
       error(
         'Timezone is required.',
@@ -360,43 +617,84 @@ export default function SettingsPage() {
     }
 
     /*
-     * Financial year start uses MM-DD.
+     * ----------------------------------------------------------
+     * FINANCIAL YEAR START
+     * ----------------------------------------------------------
+     *
+     * THIS IS THE IMPORTANT FIX.
+     *
+     * Regardless of whether the current form contains:
+     *
+     * 01-01
+     *
+     * or:
+     *
+     * 2026-01-01
+     *
+     * the value sent to updateSettings() will always be:
+     *
+     * 01-01
      */
-    if (
-      !/^\d{2}-\d{2}$/.test(
-        financialYearStart,
-      )
-    ) {
-      error(
-        'Financial year start must use MM-DD format, for example 01-01.',
-      )
-      return
-    }
 
-    const [
-      month,
-      day,
-    ] = financialYearStart
-      .split('-')
-      .map(Number)
+    let financialYearStart: string
 
-    if (
-      month < 1 ||
-      month > 12 ||
-      day < 1 ||
-      day > 31
-    ) {
+    try {
+      financialYearStart =
+        normalizeFinancialYearStart(
+          form.financial_year_start,
+        )
+    } catch (financialYearError) {
       error(
-        'Financial year start is invalid.',
+        financialYearError instanceof
+          Error
+          ? financialYearError.message
+          : 'Financial year start must use MM-DD format, for example 01-01.',
       )
+
       return
     }
 
     /*
-     * Clean payload using ONLY fields
-     * supported by CompanySettings.
+     * ----------------------------------------------------------
+     * VAT VALIDATION
+     * ----------------------------------------------------------
      */
-    const cleanSettings: SettingsForm = {
+
+    const vatRate =
+      Number(
+        form.default_vat_rate,
+      )
+
+    if (
+      !Number.isFinite(
+        vatRate,
+      ) ||
+      vatRate < 0 ||
+      vatRate > 100
+    ) {
+      error(
+        'VAT rate must be between 0 and 100.',
+      )
+      return
+    }
+
+    const vatNumber =
+      normalize(
+        form.vat_number,
+      )
+
+    /*
+     * ----------------------------------------------------------
+     * CLEAN SETTINGS
+     * ----------------------------------------------------------
+     *
+     * Keep the CompanySettings structure.
+     *
+     * No unsupported fields are invented here.
+     */
+
+    const cleanSettings:
+      SettingsForm = {
       ...form,
 
       company_name:
@@ -448,6 +746,9 @@ export default function SettingsPage() {
       opening_balance:
         openingBalance,
 
+      /*
+       * ALWAYS MM-DD
+       */
       financial_year_start:
         financialYearStart,
 
@@ -455,7 +756,24 @@ export default function SettingsPage() {
 
       date_format:
         dateFormat,
+
+      vat_number:
+        vatNumber,
+
+      default_vat_rate:
+        vatRate,
+
+      vat_enabled:
+        Boolean(
+          form.vat_enabled,
+        ),
     }
+
+    /*
+     * ----------------------------------------------------------
+     * SAVE
+     * ----------------------------------------------------------
+     */
 
     setSaving(true)
 
@@ -464,6 +782,10 @@ export default function SettingsPage() {
         cleanSettings,
       )
 
+      /*
+       * Keep the local form synchronized with exactly
+       * what was sent to the database.
+       */
       setForm(cleanSettings)
 
       success(
@@ -485,20 +807,27 @@ export default function SettingsPage() {
     }
   }
 
-  /*
-   * Reusable save button.
-   */
+  /* ==========================================================================
+     SAVE BUTTON
+     ========================================================================== */
+
   const SaveButton = () => (
     <Button
       variant="primary"
       size="sm"
-      icon={<Save size={13} />}
+      icon={
+        <Save size={13} />
+      }
       onClick={handleSave}
       loading={saving}
     >
       Save
     </Button>
   )
+
+  /* ==========================================================================
+     RENDER
+     ========================================================================== */
 
   return (
     <div>
@@ -508,37 +837,60 @@ export default function SettingsPage() {
       />
 
       <div className="flex gap-6">
-        {/* Sidebar */}
+        {/* ================================================================
+            SIDEBAR
+            ================================================================ */}
+
         <div className="w-48 shrink-0">
           <nav className="space-y-0.5">
-            {tabs.map((item) => {
-              const Icon = item.icon
+            {tabs.map(
+              (item) => {
+                const Icon =
+                  item.icon
 
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  onClick={() =>
-                    setTab(item.key)
-                  }
-                  className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg transition-colors text-left ${
-                    tab === item.key
-                      ? 'bg-xp-light-purple text-xp-purple font-medium'
-                      : 'text-xp-muted hover:bg-xp-light-gray hover:text-[#111]'
-                  }`}
-                >
-                  <Icon size={14} />
-                  {item.label}
-                </button>
-              )
-            })}
+                return (
+                  <button
+                    key={
+                      item.key
+                    }
+                    type="button"
+                    onClick={() =>
+                      setTab(
+                        item.key,
+                      )
+                    }
+                    className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg transition-colors text-left ${
+                      tab ===
+                      item.key
+                        ? 'bg-xp-light-purple text-xp-purple font-medium'
+                        : 'text-xp-muted hover:bg-xp-light-gray hover:text-[#111]'
+                    }`}
+                  >
+                    <Icon
+                      size={14}
+                    />
+
+                    {
+                      item.label
+                    }
+                  </button>
+                )
+              },
+            )}
           </nav>
         </div>
 
-        {/* Content */}
+        {/* ================================================================
+            CONTENT
+            ================================================================ */}
+
         <div className="flex-1">
-          {/* General */}
-          {tab === 'general' && (
+          {/* ============================================================
+              GENERAL
+              ============================================================ */}
+
+          {tab ===
+            'general' && (
             <Card className="p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-[#111]">
@@ -551,11 +903,16 @@ export default function SettingsPage() {
               <div className="grid grid-cols-2 gap-3">
                 <Select
                   label="Timezone"
-                  value={form.timezone}
-                  onChange={(event) =>
+                  value={
+                    form.timezone
+                  }
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'timezone',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -567,20 +924,28 @@ export default function SettingsPage() {
                     'Australia/Sydney',
                     'Asia/Dubai',
                   ].map(
-                    (value) => ({
+                    (
                       value,
-                      label: value,
+                    ) => ({
+                      value,
+                      label:
+                        value,
                     }),
                   )}
                 />
 
                 <Select
                   label="Date Format"
-                  value={form.date_format}
-                  onChange={(event) =>
+                  value={
+                    form.date_format
+                  }
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'date_format',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -589,9 +954,12 @@ export default function SettingsPage() {
                     'YYYY-MM-DD',
                     'MM/DD/YYYY',
                   ].map(
-                    (value) => ({
+                    (
                       value,
-                      label: value,
+                    ) => ({
+                      value,
+                      label:
+                        value,
                     }),
                   )}
                 />
@@ -609,7 +977,9 @@ export default function SettingsPage() {
                     </p>
 
                     <p className="text-sm font-medium text-[#111]">
-                      {form.currency}{' '}
+                      {
+                        form.currency
+                      }{' '}
                       (
                       {
                         form.currency_symbol
@@ -624,7 +994,9 @@ export default function SettingsPage() {
                     </p>
 
                     <p className="text-sm font-medium text-[#111]">
-                      {form.timezone}
+                      {
+                        form.timezone
+                      }
                     </p>
                   </div>
                 </div>
@@ -632,8 +1004,12 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {/* Company */}
-          {tab === 'company' && (
+          {/* ============================================================
+              COMPANY
+              ============================================================ */}
+
+          {tab ===
+            'company' && (
             <Card className="p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-[#111]">
@@ -650,10 +1026,13 @@ export default function SettingsPage() {
                     value={
                       form.company_name
                     }
-                    onChange={(event) =>
+                    onChange={(
+                      event,
+                    ) =>
                       updateForm(
                         'company_name',
-                        event.target
+                        event
+                          .target
                           .value,
                       )
                     }
@@ -662,11 +1041,16 @@ export default function SettingsPage() {
 
                 <Input
                   label="Phone"
-                  value={form.phone}
-                  onChange={(event) =>
+                  value={
+                    form.phone
+                  }
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'phone',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -675,11 +1059,16 @@ export default function SettingsPage() {
                 <Input
                   label="Email"
                   type="email"
-                  value={form.email}
-                  onChange={(event) =>
+                  value={
+                    form.email
+                  }
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'email',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -688,11 +1077,16 @@ export default function SettingsPage() {
                 <div className="col-span-2">
                   <Input
                     label="Website"
-                    value={form.website}
-                    onChange={(event) =>
+                    value={
+                      form.website
+                    }
+                    onChange={(
+                      event,
+                    ) =>
                       updateForm(
                         'website',
-                        event.target
+                        event
+                          .target
                           .value,
                       )
                     }
@@ -702,11 +1096,16 @@ export default function SettingsPage() {
 
               <Textarea
                 label="Address"
-                value={form.address}
-                onChange={(event) =>
+                value={
+                  form.address
+                }
+                onChange={(
+                  event,
+                ) =>
                   updateForm(
                     'address',
-                    event.target
+                    event
+                      .target
                       .value,
                   )
                 }
@@ -723,10 +1122,13 @@ export default function SettingsPage() {
                     value={
                       form.bank_name
                     }
-                    onChange={(event) =>
+                    onChange={(
+                      event,
+                    ) =>
                       updateForm(
                         'bank_name',
-                        event.target
+                        event
+                          .target
                           .value,
                       )
                     }
@@ -737,10 +1139,13 @@ export default function SettingsPage() {
                     value={
                       form.bank_account
                     }
-                    onChange={(event) =>
+                    onChange={(
+                      event,
+                    ) =>
                       updateForm(
                         'bank_account',
-                        event.target
+                        event
+                          .target
                           .value,
                       )
                     }
@@ -751,10 +1156,13 @@ export default function SettingsPage() {
                     value={
                       form.bank_branch
                     }
-                    onChange={(event) =>
+                    onChange={(
+                      event,
+                    ) =>
                       updateForm(
                         'bank_branch',
-                        event.target
+                        event
+                          .target
                           .value,
                       )
                     }
@@ -764,8 +1172,12 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {/* Invoice */}
-          {tab === 'invoice' && (
+          {/* ============================================================
+              INVOICE
+              ============================================================ */}
+
+          {tab ===
+            'invoice' && (
             <Card className="p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-[#111]">
@@ -781,10 +1193,13 @@ export default function SettingsPage() {
                   value={
                     form.invoice_prefix
                   }
-                  onChange={(event) =>
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'invoice_prefix',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -799,11 +1214,14 @@ export default function SettingsPage() {
                   value={
                     form.invoice_starting_number
                   }
-                  onChange={(event) =>
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'invoice_starting_number',
                       Number(
-                        event.target
+                        event
+                          .target
                           .value,
                       ),
                     )
@@ -816,10 +1234,13 @@ export default function SettingsPage() {
                     value={
                       form.default_payment_terms
                     }
-                    onChange={(event) =>
+                    onChange={(
+                      event,
+                    ) =>
                       updateForm(
                         'default_payment_terms',
-                        event.target
+                        event
+                          .target
                           .value,
                       )
                     }
@@ -832,10 +1253,13 @@ export default function SettingsPage() {
                 value={
                   form.default_notes
                 }
-                onChange={(event) =>
+                onChange={(
+                  event,
+                ) =>
                   updateForm(
                     'default_notes',
-                    event.target
+                    event
+                      .target
                       .value,
                   )
                 }
@@ -846,10 +1270,13 @@ export default function SettingsPage() {
                 value={
                   form.terms_and_conditions
                 }
-                onChange={(event) =>
+                onChange={(
+                  event,
+                ) =>
                   updateForm(
                     'terms_and_conditions',
-                    event.target
+                    event
+                      .target
                       .value,
                   )
                 }
@@ -860,10 +1287,13 @@ export default function SettingsPage() {
                 value={
                   form.invoice_footer
                 }
-                onChange={(event) =>
+                onChange={(
+                  event,
+                ) =>
                   updateForm(
                     'invoice_footer',
-                    event.target
+                    event
+                      .target
                       .value,
                   )
                 }
@@ -871,7 +1301,8 @@ export default function SettingsPage() {
 
               <div className="p-3 bg-xp-light-purple rounded-lg border border-[#e9d5ff]">
                 <p className="text-xs text-xp-purple">
-                  Next invoice will be:{' '}
+                  Next invoice will
+                  be:{' '}
                   <strong>
                     {form.invoice_prefix ||
                       'XP-INV'}
@@ -891,8 +1322,12 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {/* Payment */}
-          {tab === 'payment' && (
+          {/* ============================================================
+              PAYMENT
+              ============================================================ */}
+
+          {tab ===
+            'payment' && (
             <Card className="p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-[#111]">
@@ -909,9 +1344,9 @@ export default function SettingsPage() {
 
                 <p className="text-xs text-xp-muted leading-relaxed">
                   Payment records support Bank
-                  Transfer, Cash, Card, Online
-                  Payment and Other through the
-                  Payments module.
+                  Transfer, Cash, Card,
+                  Online Payment and Other
+                  through the Payments module.
                 </p>
               </div>
 
@@ -921,10 +1356,13 @@ export default function SettingsPage() {
                   value={
                     form.currency
                   }
-                  onChange={(event) =>
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'currency',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -935,10 +1373,13 @@ export default function SettingsPage() {
                   value={
                     form.currency_symbol
                   }
-                  onChange={(event) =>
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'currency_symbol',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -947,8 +1388,12 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {/* Financial */}
-          {tab === 'financial' && (
+          {/* ============================================================
+              FINANCIAL
+              ============================================================ */}
+
+          {tab ===
+            'financial' && (
             <Card className="p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-[#111]">
@@ -964,10 +1409,13 @@ export default function SettingsPage() {
                   value={
                     form.currency
                   }
-                  onChange={(event) =>
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'currency',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -979,10 +1427,13 @@ export default function SettingsPage() {
                   value={
                     form.currency_symbol
                   }
-                  onChange={(event) =>
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'currency_symbol',
-                      event.target
+                      event
+                        .target
                         .value,
                     )
                   }
@@ -996,31 +1447,73 @@ export default function SettingsPage() {
                   value={
                     form.opening_balance
                   }
-                  onChange={(event) =>
+                  onChange={(
+                    event,
+                  ) =>
                     updateForm(
                       'opening_balance',
                       Number(
-                        event.target
+                        event
+                          .target
                           .value,
                       ),
                     )
                   }
                 />
 
-                <Input
-                  label="Financial Year Start"
-                  value={
+                <div>
+                  <Input
+                    label="Financial Year Start"
+                    value={
+                      form.financial_year_start
+                    }
+                    onChange={(
+                      event,
+                    ) => {
+                      /*
+                       * Accept normal user input.
+                       *
+                       * Examples:
+                       *
+                       * 01-01
+                       * 04-01
+                       */
+                      updateForm(
+                        'financial_year_start',
+                        event
+                          .target
+                          .value,
+                      )
+                    }
+                    }
+                    placeholder="01-01"
+                  />
+
+                  <p className="mt-1.5 text-[11px] text-xp-muted">
+                    Use MM-DD format,
+                    for example
+                    01-01 for January
+                    1.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-lg bg-xp-off-white border border-xp-border">
+                <p className="text-xs font-bold text-xp-muted uppercase tracking-widest mb-2">
+                  Financial Year
+                </p>
+
+                <p className="text-sm font-medium text-[#111]">
+                  Starts on{' '}
+                  {
                     form.financial_year_start
                   }
-                  onChange={(event) =>
-                    updateForm(
-                      'financial_year_start',
-                      event.target
-                        .value,
-                    )
-                  }
-                  placeholder="01-01"
-                />
+                </p>
+
+                <p className="text-xs text-xp-muted mt-1">
+                  Stored in the database
+                  as MM-DD.
+                </p>
               </div>
 
               <div className="p-4 rounded-lg bg-xp-off-white border border-xp-border">
@@ -1029,18 +1522,108 @@ export default function SettingsPage() {
                 </p>
 
                 <p className="text-lg font-semibold text-[#111]">
-                  {form.currency_symbol}{' '}
+                  {
+                    form.currency_symbol
+                  }{' '}
                   {Number(
                     form.opening_balance ||
                       0,
                   ).toLocaleString()}
                 </p>
               </div>
+
+              <div className="p-4 rounded-lg bg-xp-off-white border border-xp-border">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-[#111]">
+                      VAT / Tax
+                    </p>
+
+                    <p className="text-xs text-xp-muted mt-1">
+                      Configure the default VAT
+                      rate used by the business.
+                    </p>
+                  </div>
+
+                  <label className="inline-flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={
+                        Boolean(
+                          form.vat_enabled,
+                        )
+                      }
+                      onChange={(
+                        event,
+                      ) =>
+                        updateForm(
+                          'vat_enabled',
+                          event
+                            .target
+                            .checked,
+                        )
+                      }
+                      className="h-4 w-4 rounded border-xp-border text-xp-purple focus:ring-xp-purple"
+                    />
+
+                    <span className="text-xs font-medium text-[#111]">
+                      Enable VAT
+                    </span>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 mt-4">
+                  <Input
+                    label="VAT Number"
+                    value={
+                      form.vat_number
+                    }
+                    onChange={(
+                      event,
+                    ) =>
+                      updateForm(
+                        'vat_number',
+                        event
+                          .target
+                          .value,
+                      )
+                    }
+                    placeholder="VAT registration number"
+                  />
+
+                  <Input
+                    label="Default VAT Rate (%)"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={
+                      form.default_vat_rate
+                    }
+                    onChange={(
+                      event,
+                    ) =>
+                      updateForm(
+                        'default_vat_rate',
+                        Number(
+                          event
+                            .target
+                            .value,
+                        ),
+                      )
+                    }
+                  />
+                </div>
+              </div>
             </Card>
           )}
 
-          {/* Notifications */}
-          {tab === 'notifications' && (
+          {/* ============================================================
+              NOTIFICATIONS
+              ============================================================ */}
+
+          {tab ===
+            'notifications' && (
             <Card className="p-6">
               <p className="text-sm font-semibold text-[#111] mb-4">
                 Notifications
@@ -1054,18 +1637,22 @@ export default function SettingsPage() {
                 <p className="text-xs text-xp-muted leading-relaxed">
                   Notification delivery is handled
                   by the application's backend
-                  services. Your current
+                  services. The current
                   company_settings model does not
                   contain notification preference
-                  fields, so no unsupported or fake
-                  settings are stored here.
+                  fields, so no unsupported settings
+                  are stored here.
                 </p>
               </div>
             </Card>
           )}
 
-          {/* Security */}
-          {tab === 'security' && (
+          {/* ============================================================
+              SECURITY
+              ============================================================ */}
+
+          {tab ===
+            'security' && (
             <Card className="p-6">
               <p className="text-sm font-semibold text-[#111] mb-4">
                 Security
@@ -1100,8 +1687,12 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {/* Appearance */}
-          {tab === 'appearance' && (
+          {/* ============================================================
+              APPEARANCE
+              ============================================================ */}
+
+          {tab ===
+            'appearance' && (
             <Card className="p-6">
               <p className="text-sm font-semibold text-[#111] mb-4">
                 Appearance
@@ -1123,8 +1714,12 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {/* Backup */}
-          {tab === 'backup' && (
+          {/* ============================================================
+              BACKUP
+              ============================================================ */}
+
+          {tab ===
+            'backup' && (
             <Card className="p-6">
               <p className="text-sm font-semibold text-[#111] mb-4">
                 Backup
