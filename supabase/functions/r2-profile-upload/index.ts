@@ -1,101 +1,165 @@
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+
+import { createClient } from "npm:@supabase/supabase-js@2"
+
 import {
   DeleteObjectCommand,
   PutObjectCommand,
   S3Client,
-} from 'npm:@aws-sdk/client-s3'
+} from "npm:@aws-sdk/client-s3"
 
-/*
- * =========================================================
- * CONFIGURATION
- * =========================================================
- */
+/* ==========================================================================
+   CONFIGURATION
+   ========================================================================== */
 
-const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
+const MAX_FILE_SIZE =
+  5 * 1024 * 1024 // 5 MB
 
-const ALLOWED_MIME_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'image/gif',
-])
+const ALLOWED_MIME_TYPES =
+  new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+  ])
 
-const ALLOWED_EXTENSIONS: Record<
-  string,
-  string
-> = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-  'image/webp': 'webp',
-  'image/gif': 'gif',
-}
+const ALLOWED_EXTENSIONS:
+  Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+  }
 
-/*
- * Current development origin from your screenshot:
- *
- * https://localhost:8443
- *
- * Additional common development origin is included.
- *
- * For production, add your actual deployed frontend
- * origin to CORS_ORIGINS in Supabase secrets.
- */
-const DEFAULT_ALLOWED_ORIGINS = [
-  'https://localhost:8443',
-  'http://localhost:8443',
-  'http://localhost:5173',
-  'https://localhost:5173',
-]
+/* ==========================================================================
+   ENVIRONMENT
+   ========================================================================== */
+
+const SUPABASE_URL =
+  Deno.env.get("SUPABASE_URL") ?? ""
+
+const SUPABASE_ANON_KEY =
+  Deno.env.get("SUPABASE_ANON_KEY") ??
+  Deno.env.get(
+    "SUPABASE_PUBLISHABLE_KEY",
+  ) ??
+  ""
+
+const SUPABASE_SERVICE_ROLE_KEY =
+  Deno.env.get(
+    "SUPABASE_SERVICE_ROLE_KEY",
+  ) ??
+  Deno.env.get(
+    "SUPABASE_SECRET_KEY",
+  ) ??
+  ""
+
+const R2_ACCOUNT_ID =
+  Deno.env.get("R2_ACCOUNT_ID") ?? ""
+
+const R2_ACCESS_KEY_ID =
+  Deno.env.get(
+    "R2_ACCESS_KEY_ID",
+  ) ?? ""
+
+const R2_SECRET_ACCESS_KEY =
+  Deno.env.get(
+    "R2_SECRET_ACCESS_KEY",
+  ) ?? ""
+
+const R2_BUCKET_NAME =
+  Deno.env.get(
+    "R2_BUCKET_NAME",
+  ) ??
+  "xyphora-prime-documents"
+
+const R2_ENDPOINT =
+  Deno.env.get("R2_ENDPOINT") ||
+  (
+    R2_ACCOUNT_ID
+      ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
+      : ""
+  )
+
+/* ==========================================================================
+   CORS
+   ========================================================================== */
+
+const DEFAULT_ALLOWED_ORIGINS =
+  [
+    /*
+     * Production
+     */
+    "https://xyphoraprimemanagement.com",
+    "https://www.xyphoraprimemanagement.com",
+
+    /*
+     * Development
+     */
+    "http://localhost:5173",
+    "https://localhost:5173",
+    "http://localhost:8443",
+    "https://localhost:8443",
+  ]
 
 const configuredOrigins =
-  Deno.env.get('CORS_ORIGINS')
-    ?.split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean) ?? []
+  (
+    Deno.env.get(
+      "CORS_ORIGINS",
+    ) ?? ""
+  )
+    .split(",")
+    .map((origin) =>
+      origin.trim(),
+    )
+    .filter(Boolean)
 
-const allowedOrigins = new Set([
-  ...DEFAULT_ALLOWED_ORIGINS,
-  ...configuredOrigins,
-])
-
-/*
- * =========================================================
- * CORS
- * =========================================================
- */
+const allowedOrigins =
+  new Set<string>([
+    ...DEFAULT_ALLOWED_ORIGINS,
+    ...configuredOrigins,
+  ])
 
 function getCorsHeaders(
   request: Request,
 ): Record<string, string> {
   const origin =
-    request.headers.get('origin') ?? ''
+    request.headers.get(
+      "Origin",
+    ) ?? ""
 
-  const allowedOrigin =
-    allowedOrigins.has(origin)
-      ? origin
-      : DEFAULT_ALLOWED_ORIGINS.includes(
-            'https://localhost:8443',
-          )
-        ? 'https://localhost:8443'
-        : origin
-
-  return {
-    'Access-Control-Allow-Origin':
-      allowedOrigin,
-    'Access-Control-Allow-Headers':
-      'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods':
-      'POST, OPTIONS',
-    'Access-Control-Max-Age': '86400',
-    Vary: 'Origin',
+  const headers: Record<
+    string,
+    string
+  > = {
+    "Access-Control-Allow-Headers":
+      "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods":
+      "POST, OPTIONS",
+    "Access-Control-Max-Age":
+      "86400",
+    Vary: "Origin",
   }
+
+  /*
+   * Only return Access-Control-Allow-Origin when the
+   * requesting origin is explicitly trusted.
+   */
+  if (
+    origin &&
+    allowedOrigins.has(origin)
+  ) {
+    headers[
+      "Access-Control-Allow-Origin"
+    ] = origin
+  }
+
+  return headers
 }
 
-/*
- * =========================================================
- * RESPONSE HELPERS
- * =========================================================
- */
+/* ==========================================================================
+   RESPONSE HELPERS
+   ========================================================================== */
 
 function jsonResponse(
   request: Request,
@@ -107,9 +171,13 @@ function jsonResponse(
     {
       status,
       headers: {
-        ...getCorsHeaders(request),
-        'Content-Type':
-          'application/json',
+        ...getCorsHeaders(
+          request,
+        ),
+        "Content-Type":
+          "application/json; charset=utf-8",
+        "Cache-Control":
+          "no-store",
       },
     },
   )
@@ -130,16 +198,15 @@ function errorResponse(
   )
 }
 
-/*
- * =========================================================
- * ENVIRONMENT
- * =========================================================
- */
+/* ==========================================================================
+   ENVIRONMENT VALIDATION
+   ========================================================================== */
 
 function getRequiredEnv(
   name: string,
 ): string {
-  const value = Deno.env.get(name)
+  const value =
+    Deno.env.get(name)
 
   if (!value) {
     throw new Error(
@@ -150,77 +217,357 @@ function getRequiredEnv(
   return value
 }
 
-/*
- * =========================================================
- * R2 CLIENT
- * =========================================================
- */
+function validateEnvironment(): void {
+  const missing: string[] = []
 
-function createR2Client() {
-  const accountId =
-    getRequiredEnv('R2_ACCOUNT_ID')
-
-  const accessKeyId =
-    getRequiredEnv(
-      'R2_ACCESS_KEY_ID',
+  if (!SUPABASE_URL) {
+    missing.push(
+      "SUPABASE_URL",
     )
+  }
 
-  const secretAccessKey =
-    getRequiredEnv(
-      'R2_SECRET_ACCESS_KEY',
+  if (!SUPABASE_ANON_KEY) {
+    missing.push(
+      "SUPABASE_ANON_KEY / SUPABASE_PUBLISHABLE_KEY",
     )
+  }
 
+  if (
+    !SUPABASE_SERVICE_ROLE_KEY
+  ) {
+    missing.push(
+      "SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY",
+    )
+  }
+
+  if (!R2_ACCOUNT_ID) {
+    missing.push(
+      "R2_ACCOUNT_ID",
+    )
+  }
+
+  if (!R2_ACCESS_KEY_ID) {
+    missing.push(
+      "R2_ACCESS_KEY_ID",
+    )
+  }
+
+  if (
+    !R2_SECRET_ACCESS_KEY
+  ) {
+    missing.push(
+      "R2_SECRET_ACCESS_KEY",
+    )
+  }
+
+  if (!R2_BUCKET_NAME) {
+    missing.push(
+      "R2_BUCKET_NAME",
+    )
+  }
+
+  if (!R2_ENDPOINT) {
+    missing.push(
+      "R2_ENDPOINT",
+    )
+  }
+
+  if (
+    missing.length > 0
+  ) {
+    throw new Error(
+      `Missing required environment variables: ${missing.join(", ")}`,
+    )
+  }
+}
+
+/* ==========================================================================
+   SUPABASE CLIENT
+   ========================================================================== */
+
+function createUserClient(
+  request: Request,
+) {
+  const authorization =
+    request.headers.get(
+      "Authorization",
+    ) ?? ""
+
+  return createClient(
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    {
+      global: {
+        headers: {
+          Authorization:
+            authorization,
+        },
+      },
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    },
+  )
+}
+
+function createServiceClient() {
+  return createClient(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY,
+    {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    },
+  )
+}
+
+/* ==========================================================================
+   R2 CLIENT
+   ========================================================================== */
+
+function createR2Client(): S3Client {
   return new S3Client({
-    region: 'auto',
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    region: "auto",
+    endpoint: R2_ENDPOINT,
     credentials: {
-      accessKeyId,
-      secretAccessKey,
+      accessKeyId:
+        R2_ACCESS_KEY_ID,
+      secretAccessKey:
+        R2_SECRET_ACCESS_KEY,
     },
   })
 }
 
-/*
- * =========================================================
- * FILE NAME HELPERS
- * =========================================================
- */
+/* ==========================================================================
+   AUTHENTICATION
+   ========================================================================== */
+
+async function authenticate(
+  request: Request,
+) {
+  const authorization =
+    request.headers.get(
+      "Authorization",
+    )
+
+  if (
+    !authorization ||
+    !authorization
+      .toLowerCase()
+      .startsWith(
+        "bearer ",
+      )
+  ) {
+    throw new AuthError(
+      "Missing authentication token.",
+    )
+  }
+
+  const token =
+    authorization
+      .slice(7)
+      .trim()
+
+  if (!token) {
+    throw new AuthError(
+      "Missing authentication token.",
+    )
+  }
+
+  const supabase =
+    createUserClient(
+      request,
+    )
+
+  const {
+    data,
+    error,
+  } =
+    await supabase.auth.getUser(
+      token,
+    )
+
+  if (
+    error ||
+    !data.user
+  ) {
+    console.error(
+      "Authentication failed:",
+      error,
+    )
+
+    throw new AuthError(
+      "Invalid or expired authentication session.",
+    )
+  }
+
+  return data.user
+}
+
+/* ==========================================================================
+   PROFILE
+   ========================================================================== */
+
+async function getProfile(
+  userId: string,
+) {
+  const supabase =
+    createServiceClient()
+
+  const {
+    data: profile,
+    error,
+  } =
+    await supabase
+      .from("profiles")
+      .select(
+        "id, avatar_url, role, status",
+      )
+      .eq(
+        "id",
+        userId,
+      )
+      .maybeSingle()
+
+  if (error) {
+    console.error(
+      "Profile lookup failed:",
+      error,
+    )
+
+    throw new Error(
+      "Unable to load your profile.",
+    )
+  }
+
+  if (!profile) {
+    throw new AuthorizationError(
+      "Profile not found.",
+    )
+  }
+
+  /*
+   * Inactive users cannot upload or delete
+   * profile images.
+   */
+  if (
+    profile.status &&
+    profile.status !==
+      "Active"
+  ) {
+    throw new AuthorizationError(
+      "Your account is inactive.",
+    )
+  }
+
+  return profile
+}
+
+/* ==========================================================================
+   FILE HELPERS
+   ========================================================================== */
 
 function getExtension(
   mimeType: string,
 ): string {
   return (
-    ALLOWED_EXTENSIONS[mimeType] ||
-    'webp'
+    ALLOWED_EXTENSIONS[
+      mimeType
+    ] ?? "webp"
   )
 }
 
-/*
- * =========================================================
- * R2 KEY VALIDATION
- * =========================================================
- *
- * We only allow deletion of profile objects created
- * by this function.
- *
- * This prevents a malicious request from supplying an
- * arbitrary R2 key and deleting another application's file.
- */
+/* ==========================================================================
+   PROFILE R2 KEY VALIDATION
+   ========================================================================== */
 
 function isOwnedProfileObject(
   key: string,
   userId: string,
 ): boolean {
-  return key.startsWith(
-    `profiles/${userId}/avatar-`,
-  )
+  if (!key) {
+    return false
+  }
+
+  /*
+   * Expected:
+   *
+   * profiles/{user-id}/avatar-{uuid}.jpg
+   *
+   * or png/webp/gif.
+   */
+  const prefix =
+    `profiles/${userId}/avatar-`
+
+  if (
+    !key.startsWith(prefix)
+  ) {
+    return false
+  }
+
+  /*
+   * Prevent traversal.
+   */
+  if (
+    key.includes("..") ||
+    key.includes("\\")
+  ) {
+    return false
+  }
+
+  /*
+   * Prevent control characters.
+   */
+  if (
+    /[\u0000-\u001F\u007F]/.test(
+      key,
+    )
+  ) {
+    return false
+  }
+
+  /*
+   * Reject URLs.
+   */
+  if (
+    key.includes("://") ||
+    key.startsWith("/") ||
+    key.startsWith(
+      "http",
+    )
+  ) {
+    return false
+  }
+
+  /*
+   * Only allow image extensions.
+   */
+  if (
+    !/\.(jpg|jpeg|png|webp|gif)$/i.test(
+      key,
+    )
+  ) {
+    return false
+  }
+
+  /*
+   * Prevent unexpectedly large object keys.
+   */
+  if (
+    key.length > 500
+  ) {
+    return false
+  }
+
+  return true
 }
 
-/*
- * =========================================================
- * DELETE OLD PROFILE IMAGE
- * =========================================================
- */
+/* ==========================================================================
+   DELETE R2 OBJECT
+   ========================================================================== */
 
 async function deleteR2Object(
   r2: S3Client,
@@ -228,308 +575,261 @@ async function deleteR2Object(
   key: string,
 ): Promise<void> {
   await r2.send(
-    new DeleteObjectCommand({
-      Bucket: bucket,
-      Key: key,
-    }),
+    new DeleteObjectCommand(
+      {
+        Bucket: bucket,
+        Key: key,
+      },
+    ),
   )
 }
 
-/*
- * =========================================================
- * MAIN EDGE FUNCTION
- * =========================================================
- */
+/* ==========================================================================
+   CUSTOM ERRORS
+   ========================================================================== */
+
+class AuthError extends Error {
+  constructor(
+    message: string,
+  ) {
+    super(message)
+    this.name =
+      "AuthError"
+  }
+}
+
+class AuthorizationError
+  extends Error {
+  constructor(
+    message: string,
+  ) {
+    super(message)
+    this.name =
+      "AuthorizationError"
+  }
+}
+
+/* ==========================================================================
+   MAIN EDGE FUNCTION
+   ========================================================================== */
 
 Deno.serve(
-  async (request: Request) => {
+  async (
+    request: Request,
+  ): Promise<Response> => {
     /*
-     * -----------------------------------------------------
+     * ================================================================
      * CORS PREFLIGHT
-     * -----------------------------------------------------
+     * ================================================================
      *
-     * This is the important part for the 401/CORS error
-     * shown in your browser console.
+     * IMPORTANT:
      *
-     * OPTIONS must NOT require authentication.
+     * OPTIONS must be answered before authentication.
+     *
+     * Otherwise the browser will report a CORS error instead of
+     * exposing the actual authentication response.
      */
 
-    if (request.method === 'OPTIONS') {
-      return new Response('ok', {
-        status: 200,
-        headers:
-          getCorsHeaders(request),
-      })
+    if (
+      request.method ===
+      "OPTIONS"
+    ) {
+      return new Response(
+        null,
+        {
+          status: 204,
+          headers:
+            getCorsHeaders(
+              request,
+            ),
+        },
+      )
     }
 
     /*
-     * Only POST is supported.
+     * ================================================================
+     * METHOD
+     * ================================================================
      */
 
-    if (request.method !== 'POST') {
+    if (
+      request.method !==
+      "POST"
+    ) {
       return errorResponse(
         request,
-        'Method not allowed.',
+        "Method not allowed.",
         405,
       )
     }
 
     try {
       /*
-       * ---------------------------------------------------
-       * AUTHORIZATION
-       * ---------------------------------------------------
+       * ==============================================================
+       * ENVIRONMENT
+       * ==============================================================
        */
 
-      const authorization =
-        request.headers.get(
-          'Authorization',
-        )
-
-      if (!authorization) {
-        return errorResponse(
-          request,
-          'Missing authorization header.',
-          401,
-        )
-      }
-
-      if (
-        !authorization
-          .toLowerCase()
-          .startsWith('bearer ')
-      ) {
-        return errorResponse(
-          request,
-          'Invalid authorization header.',
-          401,
-        )
-      }
+      validateEnvironment()
 
       /*
-       * ---------------------------------------------------
-       * SUPABASE USER CLIENT
-       * ---------------------------------------------------
-       *
-       * This client uses the caller's JWT so Supabase
-       * knows which authenticated user is making the request.
+       * ==============================================================
+       * AUTHENTICATION
+       * ==============================================================
        */
 
-      const supabaseUrl =
-        getRequiredEnv(
-          'SUPABASE_URL',
-        )
-
-      const supabaseAnonKey =
-        getRequiredEnv(
-          'SUPABASE_ANON_KEY',
-        )
-
-      const supabaseUser =
-        createClient(
-          supabaseUrl,
-          supabaseAnonKey,
-          {
-            global: {
-              headers: {
-                Authorization:
-                  authorization,
-              },
-            },
-          },
-        )
-
-      const {
-        data: {
-          user,
-        },
-        error: authError,
-      } =
-        await supabaseUser.auth.getUser()
-
-      if (
-        authError ||
-        !user
-      ) {
-        console.error(
-          'Authentication failed:',
-          authError,
-        )
-
-        return errorResponse(
+      const user =
+        await authenticate(
           request,
-          'Unauthorized. Please sign in again.',
-          401,
         )
-      }
 
       /*
-       * ---------------------------------------------------
-       * SERVICE ROLE CLIENT
-       * ---------------------------------------------------
-       *
-       * Used only inside this trusted Edge Function for
-       * updating the authenticated user's profile.
+       * ==============================================================
+       * PROFILE
+       * ==============================================================
        */
 
-      const serviceRoleKey =
-        getRequiredEnv(
-          'SUPABASE_SERVICE_ROLE_KEY',
+      const profile =
+        await getProfile(
+          user.id,
         )
+
+      /*
+       * ==============================================================
+       * SERVICE CLIENT
+       * ==============================================================
+       */
 
       const supabaseAdmin =
-        createClient(
-          supabaseUrl,
-          serviceRoleKey,
-          {
-            auth: {
-              autoRefreshToken:
-                false,
-              persistSession: false,
-            },
-          },
-        )
+        createServiceClient()
 
       /*
-       * ---------------------------------------------------
-       * VERIFY PROFILE
-       * ---------------------------------------------------
-       *
-       * Make sure the authenticated user has a profile.
-       */
-
-      const {
-        data: profile,
-        error: profileError,
-      } =
-        await supabaseAdmin
-          .from('profiles')
-          .select(
-            'id, avatar_url',
-          )
-          .eq(
-            'id',
-            user.id,
-          )
-          .maybeSingle()
-
-      if (profileError) {
-        console.error(
-          'Failed to load profile:',
-          profileError,
-        )
-
-        return errorResponse(
-          request,
-          'Unable to load your profile.',
-          500,
-        )
-      }
-
-      if (!profile) {
-        return errorResponse(
-          request,
-          'Profile not found.',
-          404,
-        )
-      }
-
-      /*
-       * ---------------------------------------------------
-       * R2 CONFIGURATION
-       * ---------------------------------------------------
+       * ==============================================================
+       * R2
+       * ==============================================================
        */
 
       const bucket =
         getRequiredEnv(
-          'R2_BUCKET_NAME',
+          "R2_BUCKET_NAME",
         )
 
       const r2 =
         createR2Client()
 
       /*
-       * ---------------------------------------------------
-       * READ MULTIPART FORM
-       * ---------------------------------------------------
+       * ==============================================================
+       * CONTENT TYPE
+       * ==============================================================
        */
 
       const contentType =
         request.headers.get(
-          'content-type',
-        ) ?? ''
+          "content-type",
+        ) ?? ""
+
+      /*
+       * ==============================================================
+       * JSON DELETE REQUEST
+       * ==============================================================
+       *
+       * Delete requests may send JSON:
+       *
+       * {
+       *   "action": "delete"
+       * }
+       *
+       * Upload requests must use multipart/form-data.
+       */
 
       if (
-        !contentType
+        contentType
           .toLowerCase()
           .includes(
-            'multipart/form-data',
+            "application/json",
           )
       ) {
-        return errorResponse(
-          request,
-          'Request must use multipart/form-data.',
-          400,
-        )
-      }
+        let body: unknown
 
-      const formData =
-        await request.formData()
+        try {
+          body =
+            await request.json()
+        } catch {
+          return errorResponse(
+            request,
+            "Invalid JSON request body.",
+            400,
+          )
+        }
 
-      /*
-       * ---------------------------------------------------
-       * ACTION
-       * ---------------------------------------------------
-       *
-       * Supported:
-       *
-       * upload
-       * delete
-       *
-       * Default = upload
-       */
+        if (
+          !body ||
+          typeof body !==
+            "object" ||
+          Array.isArray(body)
+        ) {
+          return errorResponse(
+            request,
+            "Invalid request body.",
+            400,
+          )
+        }
 
-      const actionValue =
-        formData.get('action')
+        const requestBody =
+          body as {
+            action?: unknown
+          }
 
-      const action =
-        typeof actionValue === 'string'
-          ? actionValue
-              .trim()
-              .toLowerCase()
-          : 'upload'
+        const action =
+          typeof requestBody.action ===
+          "string"
+            ? requestBody.action
+                .trim()
+                .toLowerCase()
+            : ""
 
-      /*
-       * ===================================================
-       * DELETE PROFILE AVATAR
-       * ===================================================
-       */
+        if (
+          action !==
+          "delete"
+        ) {
+          return errorResponse(
+            request,
+            "Invalid request action.",
+            400,
+          )
+        }
 
-      if (action === 'delete') {
+        /*
+         * ============================================================
+         * DELETE PROFILE IMAGE
+         * ============================================================
+         */
+
         const oldAvatarUrl =
           profile.avatar_url
 
         /*
-         * Nothing to delete.
+         * Nothing to remove.
          */
 
-        if (!oldAvatarUrl) {
+        if (
+          !oldAvatarUrl
+        ) {
           return jsonResponse(
             request,
             {
               success: true,
               message:
-                'No profile image to remove.',
-              avatar_url: null,
+                "No profile image to remove.",
+              avatar_url:
+                null,
             },
           )
         }
 
         /*
-         * The database stores the R2 object key.
-         *
-         * We intentionally only delete objects that belong
-         * to this authenticated user's profile namespace.
+         * Only delete an object that belongs to the
+         * authenticated user's profile namespace.
          */
 
         if (
@@ -544,47 +844,61 @@ Deno.serve(
               bucket,
               oldAvatarUrl,
             )
-          } catch (deleteError) {
+          } catch (
+            deleteError
+          ) {
             /*
-             * Log the storage failure, but continue clearing
-             * the database reference. This prevents a broken
-             * old R2 object from leaving the user unable to
-             * remove their profile image.
+             * Log the storage problem, but still attempt
+             * to clear the database reference.
              */
 
             console.error(
-              'Failed to delete old profile image from R2:',
+              "Failed to delete old profile image from R2:",
               deleteError,
             )
           }
+        } else {
+          /*
+           * Do not delete arbitrary objects.
+           */
+
+          console.warn(
+            "Profile avatar path is outside the user's R2 namespace. Database reference will still be cleared.",
+          )
         }
 
         /*
-         * Clear avatar_url.
+         * Clear database reference.
          */
 
         const {
-          error: updateError,
+          error:
+            updateError,
         } =
           await supabaseAdmin
-            .from('profiles')
+            .from(
+              "profiles",
+            )
             .update({
-              avatar_url: null,
+              avatar_url:
+                null,
             })
             .eq(
-              'id',
+              "id",
               user.id,
             )
 
-        if (updateError) {
+        if (
+          updateError
+        ) {
           console.error(
-            'Failed to clear avatar_url:',
+            "Failed to clear avatar_url:",
             updateError,
           )
 
           return errorResponse(
             request,
-            'Profile image was removed from storage, but the profile could not be updated.',
+            "The profile image could not be removed from your profile.",
             500,
           )
         }
@@ -594,40 +908,87 @@ Deno.serve(
           {
             success: true,
             message:
-              'Profile image removed successfully.',
-            avatar_url: null,
+              "Profile image removed successfully.",
+            avatar_url:
+              null,
           },
         )
       }
 
       /*
-       * ===================================================
-       * UPLOAD PROFILE AVATAR
-       * ===================================================
+       * ==============================================================
+       * UPLOAD REQUEST
+       * ==============================================================
        */
 
-      if (action !== 'upload') {
+      if (
+        !contentType
+          .toLowerCase()
+          .includes(
+            "multipart/form-data",
+          )
+      ) {
         return errorResponse(
           request,
-          'Invalid profile image action.',
+          "Request must use multipart/form-data for image uploads.",
           400,
         )
       }
 
       /*
-       * ---------------------------------------------------
-       * GET FILE
-       * ---------------------------------------------------
-       *
-       * Accept common field names so this function works
-       * with the current ProfilePage implementation even
-       * if it uses "file", "avatar", or "image".
+       * ==============================================================
+       * FORM DATA
+       * ==============================================================
        */
 
-      const possibleFileFields = [
-        'file',
-        'avatar',
-        'image',
+      const formData =
+        await request.formData()
+
+      /*
+       * ==============================================================
+       * ACTION
+       * ==============================================================
+       */
+
+      const actionValue =
+        formData.get(
+          "action",
+        )
+
+      const action =
+        typeof actionValue ===
+        "string"
+          ? actionValue
+              .trim()
+              .toLowerCase()
+          : "upload"
+
+      if (
+        action !==
+        "upload"
+      ) {
+        return errorResponse(
+          request,
+          "Invalid upload action.",
+          400,
+        )
+      }
+
+      /*
+       * ==============================================================
+       * FILE
+       * ==============================================================
+       *
+       * Support:
+       *   file
+       *   avatar
+       *   image
+       */
+
+      const fileFields = [
+        "file",
+        "avatar",
+        "image",
       ]
 
       let file:
@@ -635,15 +996,17 @@ Deno.serve(
         | null = null
 
       for (
-        const fieldName of possibleFileFields
+        const fieldName of fileFields
       ) {
-        const candidate =
-          formData.get(fieldName)
+        const value =
+          formData.get(
+            fieldName,
+          )
 
         if (
-          candidate instanceof File
+          value instanceof File
         ) {
-          file = candidate
+          file = value
           break
         }
       }
@@ -651,15 +1014,15 @@ Deno.serve(
       if (!file) {
         return errorResponse(
           request,
-          'No profile image was provided.',
+          "No profile image was provided.",
           400,
         )
       }
 
       /*
-       * ---------------------------------------------------
-       * FILE TYPE
-       * ---------------------------------------------------
+       * ==============================================================
+       * MIME TYPE
+       * ==============================================================
        */
 
       const mimeType =
@@ -674,15 +1037,15 @@ Deno.serve(
       ) {
         return errorResponse(
           request,
-          'Invalid image type. Please upload JPG, PNG, WEBP, or GIF.',
+          "Invalid image type. Please upload JPG, PNG, WEBP, or GIF.",
           400,
         )
       }
 
       /*
-       * ---------------------------------------------------
+       * ==============================================================
        * FILE SIZE
-       * ---------------------------------------------------
+       * ==============================================================
        */
 
       if (
@@ -690,7 +1053,7 @@ Deno.serve(
       ) {
         return errorResponse(
           request,
-          'The selected image is empty.',
+          "The selected image is empty.",
           400,
         )
       }
@@ -701,33 +1064,30 @@ Deno.serve(
       ) {
         return errorResponse(
           request,
-          'Profile image must be 5 MB or smaller.',
+          "Profile image must be 5 MB or smaller.",
           400,
         )
       }
 
       /*
-       * ---------------------------------------------------
+       * ==============================================================
        * READ FILE
-       * ---------------------------------------------------
+       * ==============================================================
        */
 
       const fileBuffer =
         await file.arrayBuffer()
 
       /*
-       * ---------------------------------------------------
-       * GENERATE PRIVATE R2 OBJECT KEY
-       * ---------------------------------------------------
+       * ==============================================================
+       * CREATE PRIVATE R2 OBJECT KEY
+       * ==============================================================
        *
        * Example:
        *
        * profiles/
-       *   USER_UUID/
-       *     avatar-UUID.webp
-       *
-       * The random UUID prevents filename collisions and
-       * makes old/new avatar replacement safe.
+       *   1702f304-.../
+       *     avatar-550e8400-e29b-41d4-a716-446655440000.webp
        */
 
       const extension =
@@ -739,66 +1099,90 @@ Deno.serve(
         `profiles/${user.id}/avatar-${crypto.randomUUID()}.${extension}`
 
       /*
-       * ---------------------------------------------------
-       * UPLOAD TO R2
-       * ---------------------------------------------------
+       * ==============================================================
+       * UPLOAD TO CLOUDFLARE R2
+       * ==============================================================
        */
 
-      await r2.send(
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: objectKey,
-          Body: new Uint8Array(
-            fileBuffer,
+      try {
+        await r2.send(
+          new PutObjectCommand(
+            {
+              Bucket: bucket,
+              Key: objectKey,
+              Body: new Uint8Array(
+                fileBuffer,
+              ),
+              ContentType:
+                mimeType,
+              ContentLength:
+                file.size,
+
+              /*
+               * Keep this object private.
+               */
+              CacheControl:
+                "private, max-age=3600",
+            },
           ),
-          ContentType: mimeType,
-          ContentLength:
-            file.size,
-          CacheControl:
-            'private, max-age=3600',
-        }),
-      )
+        )
+      } catch (uploadError) {
+        console.error(
+          "R2 profile image upload failed:",
+          uploadError,
+        )
+
+        return errorResponse(
+          request,
+          "Failed to upload the profile image.",
+          500,
+        )
+      }
 
       /*
-       * ---------------------------------------------------
-       * UPDATE PROFILE
-       * ---------------------------------------------------
+       * ==============================================================
+       * SAVE R2 KEY TO PROFILE
+       * ==============================================================
        *
-       * We store the PRIVATE R2 object key, not a public
-       * R2 URL.
+       * IMPORTANT:
        *
-       * The separate r2-profile-url function can later
-       * generate a signed URL for displaying the image.
+       * avatar_url contains the PRIVATE R2 object key.
+       *
+       * It does NOT contain a public R2 URL.
        */
 
       const oldAvatarUrl =
         profile.avatar_url
 
       const {
-        error: updateError,
+        error:
+          updateError,
       } =
         await supabaseAdmin
-          .from('profiles')
+          .from("profiles")
           .update({
-            avatar_url: objectKey,
+            avatar_url:
+              objectKey,
           })
           .eq(
-            'id',
+            "id",
             user.id,
           )
 
       /*
-       * ---------------------------------------------------
+       * ==============================================================
        * DATABASE UPDATE FAILED
-       * ---------------------------------------------------
+       * ==============================================================
        *
-       * Clean up the newly uploaded R2 object so we don't
-       * leave an orphaned file in storage.
+       * Remove the newly uploaded R2 object so we don't
+       * create an orphaned storage object.
        */
 
-      if (updateError) {
+      if (
+        updateError
+      ) {
         console.error(
-          'Failed to update profile avatar_url:',
+          "Failed to update profile avatar_url:",
           updateError,
         )
 
@@ -812,25 +1196,25 @@ Deno.serve(
           cleanupError
         ) {
           console.error(
-            'Failed to clean up newly uploaded R2 object:',
+            "Failed to clean up new R2 object:",
             cleanupError,
           )
         }
 
         return errorResponse(
           request,
-          'Profile image was uploaded but could not be linked to your profile.',
+          "Profile image was uploaded but could not be linked to your profile.",
           500,
         )
       }
 
       /*
-       * ---------------------------------------------------
-       * DELETE PREVIOUS AVATAR
-       * ---------------------------------------------------
+       * ==============================================================
+       * DELETE OLD IMAGE
+       * ==============================================================
        *
        * Only delete the previous object after the database
-       * successfully points to the new image.
+       * successfully points to the new object.
        */
 
       if (
@@ -848,24 +1232,27 @@ Deno.serve(
             bucket,
             oldAvatarUrl,
           )
-        } catch (deleteError) {
+        } catch (
+          deleteError
+        ) {
           /*
-           * The new image is already active, so don't fail
-           * the request just because an old object could not
-           * be deleted.
+           * The new avatar is already active.
+           *
+           * Don't fail the request because an old
+           * unused object could not be deleted.
            */
 
           console.error(
-            'Failed to delete previous profile image:',
+            "Failed to delete previous profile image:",
             deleteError,
           )
         }
       }
 
       /*
-       * ---------------------------------------------------
+       * ==============================================================
        * SUCCESS
-       * ---------------------------------------------------
+       * ==============================================================
        */
 
       return jsonResponse(
@@ -873,12 +1260,20 @@ Deno.serve(
         {
           success: true,
           message:
-            'Profile image uploaded successfully.',
-          avatar_url: objectKey,
+            "Profile image uploaded successfully.",
+
+          /*
+           * Private R2 object key.
+           */
+          avatar_url:
+            objectKey,
+
           file_name:
             file.name,
+
           file_type:
             mimeType,
+
           file_size:
             file.size,
         },
@@ -886,24 +1281,61 @@ Deno.serve(
       )
     } catch (error) {
       /*
-       * ---------------------------------------------------
+       * ==============================================================
        * GLOBAL ERROR HANDLER
-       * ---------------------------------------------------
+       * ==============================================================
        */
 
       console.error(
-        'r2-profile-upload error:',
+        "r2-profile-upload error:",
         error,
       )
+
+      if (
+        error instanceof
+        AuthError
+      ) {
+        return errorResponse(
+          request,
+          error.message,
+          401,
+        )
+      }
+
+      if (
+        error instanceof
+        AuthorizationError
+      ) {
+        return errorResponse(
+          request,
+          error.message,
+          403,
+        )
+      }
 
       const message =
         error instanceof Error
           ? error.message
-          : 'Failed to upload profile image.'
+          : "An unexpected error occurred."
+
+      /*
+       * Don't expose infrastructure configuration
+       * details to the browser.
+       */
+
+      const safeMessage =
+        message.startsWith(
+          "Missing required environment variables:",
+        ) ||
+        message.includes(
+          "is not configured",
+        )
+          ? "The server is not correctly configured."
+          : message
 
       return errorResponse(
         request,
-        message,
+        safeMessage,
         500,
       )
     }

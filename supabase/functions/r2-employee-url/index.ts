@@ -1,8 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 
 import {
-  S3Client,
   GetObjectCommand,
+  S3Client,
 } from "npm:@aws-sdk/client-s3"
 
 import { getSignedUrl } from "npm:@aws-sdk/s3-request-presigner"
@@ -52,12 +52,13 @@ const R2_ORGANIZATION_ID =
   "default"
 
 /*
- * Signed URL lifetime.
+ * Private signed URL lifetime.
  *
- * 1 hour gives the browser enough time to display
- * the image without exposing the R2 bucket publicly.
+ * 1 hour is enough for the employee-management UI
+ * while keeping the R2 bucket private.
  */
-const SIGNED_URL_EXPIRES_IN = 60 * 60
+const SIGNED_URL_EXPIRES_IN =
+  60 * 60
 
 /* ==========================================================================
    CORS
@@ -70,13 +71,19 @@ const configuredOrigins = (
   .map((origin) => origin.trim())
   .filter(Boolean)
 
-const allowedOrigins = new Set([
-  "http://localhost:8443",
-  "https://localhost:8443",
-  "http://localhost:5173",
-  "https://localhost:5173",
-  ...configuredOrigins,
-])
+const allowedOrigins =
+  new Set<string>([
+    "https://xyphoraprimemanagement.com",
+    "https://www.xyphoraprimemanagement.com",
+
+    "http://localhost:5173",
+    "https://localhost:5173",
+
+    "http://localhost:8443",
+    "https://localhost:8443",
+
+    ...configuredOrigins,
+  ])
 
 function getCorsHeaders(
   request: Request,
@@ -91,10 +98,16 @@ function getCorsHeaders(
       "POST, OPTIONS",
     "Access-Control-Max-Age":
       "86400",
-    "Vary": "Origin",
+    "Vary":
+      "Origin",
   }
 
+  /*
+   * Never use Access-Control-Allow-Origin: *
+   * with authenticated requests.
+   */
   if (
+    origin &&
     allowedOrigins.has(origin)
   ) {
     headers[
@@ -106,7 +119,7 @@ function getCorsHeaders(
 }
 
 /* ==========================================================================
-   RESPONSE
+   RESPONSE HELPERS
    ========================================================================== */
 
 function jsonResponse(
@@ -122,8 +135,25 @@ function jsonResponse(
         ...getCorsHeaders(request),
         "Content-Type":
           "application/json; charset=utf-8",
+        "Cache-Control":
+          "no-store",
       },
     },
+  )
+}
+
+function errorResponse(
+  request: Request,
+  message: string,
+  status: number,
+): Response {
+  return jsonResponse(
+    request,
+    {
+      success: false,
+      error: message,
+    },
+    status,
   )
 }
 
@@ -159,9 +189,7 @@ function validateEnvironment(): void {
   }
 
   if (!R2_SECRET_ACCESS_KEY) {
-    missing.push(
-      "R2_SECRET_ACCESS_KEY",
-    )
+    missing.push("R2_SECRET_ACCESS_KEY")
   }
 
   if (!R2_BUCKET_NAME) {
@@ -183,11 +211,9 @@ function validateEnvironment(): void {
    SUPABASE CLIENTS
    ========================================================================== */
 
-/*
- * Authenticated user client.
- *
- * The incoming Authorization header is passed to
- * Supabase so getUser() validates the actual session.
+/**
+ * Creates a Supabase client using the authenticated
+ * user's Authorization header.
  */
 function createUserClient(
   request: Request,
@@ -215,11 +241,11 @@ function createUserClient(
   )
 }
 
-/*
+/**
  * Service-role client.
  *
- * This is created only after the request has
- * been authenticated and authorized.
+ * This client is only used after the request
+ * has successfully passed authentication.
  */
 function createServiceClient() {
   return createClient(
@@ -238,7 +264,7 @@ function createServiceClient() {
    R2 CLIENT
    ========================================================================== */
 
-function createR2Client() {
+function createR2Client(): S3Client {
   return new S3Client({
     region: "auto",
     endpoint: R2_ENDPOINT,
@@ -269,7 +295,16 @@ async function authenticate(
       "Bearer ",
     )
   ) {
-    throw new Error(
+    throw new AuthError(
+      "Missing authentication token.",
+    )
+  }
+
+  const token =
+    authorization.slice(7).trim()
+
+  if (!token) {
+    throw new AuthError(
       "Missing authentication token.",
     )
   }
@@ -281,7 +316,9 @@ async function authenticate(
     data,
     error,
   } =
-    await supabase.auth.getUser()
+    await supabase.auth.getUser(
+      token,
+    )
 
   if (
     error ||
@@ -292,7 +329,7 @@ async function authenticate(
       error,
     )
 
-    throw new Error(
+    throw new AuthError(
       "Invalid or expired authentication session.",
     )
   }
@@ -334,7 +371,7 @@ async function authorize(
   }
 
   if (!profile) {
-    throw new Error(
+    throw new AuthorizationError(
       "User profile was not found.",
     )
   }
@@ -343,29 +380,34 @@ async function authorize(
     profile.status &&
     profile.status !== "Active"
   ) {
-    throw new Error(
+    throw new AuthorizationError(
       "Your account is inactive.",
     )
   }
 
   /*
-   * Employee images are currently being accessed
-   * from the employee-management pages.
+   * Employee profile images contain private
+   * company information.
    *
-   * These roles can access employee profile images.
+   * Only authorized management/accounting roles
+   * can request signed employee image URLs.
    */
-  const allowedRoles = new Set([
-    "admin",
-    "manager",
-    "accountant",
-  ])
+  const allowedRoles =
+    new Set([
+      "admin",
+      "manager",
+      "accountant",
+    ])
+
+  const role =
+    String(profile.role ?? "")
+      .trim()
+      .toLowerCase()
 
   if (
-    !allowedRoles.has(
-      String(profile.role),
-    )
+    !allowedRoles.has(role)
   ) {
-    throw new Error(
+    throw new AuthorizationError(
       "You do not have permission to view employee profile images.",
     )
   }
@@ -374,7 +416,19 @@ async function authorize(
 }
 
 /* ==========================================================================
-   EMPLOYEE
+   EMPLOYEE UUID VALIDATION
+   ========================================================================== */
+
+function isValidUUID(
+  value: string,
+): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  )
+}
+
+/* ==========================================================================
+   EMPLOYEE LOOKUP
    ========================================================================== */
 
 async function getEmployee(
@@ -426,11 +480,11 @@ function isValidEmployeeAvatarKey(
   /*
    * Expected structure:
    *
-   * organizations/default/employees/<employee-id>/avatar-xxxxx.webp
+   * organizations/default/employees/<employee-uuid>/avatar-xxxxx.webp
    *
-   * or, when R2_ORGANIZATION_ID is configured:
+   * Or:
    *
-   * organizations/<organization-id>/employees/<employee-id>/avatar-xxxxx.webp
+   * organizations/<organization-id>/employees/<employee-uuid>/avatar-xxxxx.webp
    */
 
   const expectedPrefix =
@@ -445,8 +499,7 @@ function isValidEmployeeAvatarKey(
   }
 
   /*
-   * Prevent path traversal or unexpected
-   * object references.
+   * Prevent path traversal.
    */
   if (
     key.includes("..") ||
@@ -456,14 +509,45 @@ function isValidEmployeeAvatarKey(
   }
 
   /*
-   * Employee avatar must have an image extension.
+   * Prevent newline/control-character injection.
    */
-  const validExtension =
-    /\.(jpg|jpeg|png|webp)$/i.test(
+  if (
+    /[\u0000-\u001F\u007F]/.test(
       key,
     )
+  ) {
+    return false
+  }
 
-  if (!validExtension) {
+  /*
+   * Prevent URLs from being stored/reused
+   * as R2 object keys.
+   */
+  if (
+    key.includes("://") ||
+    key.startsWith("/") ||
+    key.startsWith("http")
+  ) {
+    return false
+  }
+
+  /*
+   * Employee avatar must be an image.
+   */
+  if (
+    !/\.(jpg|jpeg|png|webp)$/i.test(
+      key,
+    )
+  ) {
+    return false
+  }
+
+  /*
+   * Keep object keys reasonably bounded.
+   */
+  if (
+    key.length > 500
+  ) {
     return false
   }
 
@@ -471,19 +555,43 @@ function isValidEmployeeAvatarKey(
 }
 
 /* ==========================================================================
-   MAIN
+   CUSTOM ERRORS
+   ========================================================================== */
+
+class AuthError extends Error {
+  constructor(
+    message: string,
+  ) {
+    super(message)
+    this.name = "AuthError"
+  }
+}
+
+class AuthorizationError extends Error {
+  constructor(
+    message: string,
+  ) {
+    super(message)
+    this.name =
+      "AuthorizationError"
+  }
+}
+
+/* ==========================================================================
+   MAIN HANDLER
    ========================================================================== */
 
 Deno.serve(
   async (
     request: Request,
-  ) => {
+  ): Promise<Response> => {
     /*
      * ------------------------------------------------------------
      * CORS PREFLIGHT
      * ------------------------------------------------------------
      *
-     * Must happen before authentication.
+     * IMPORTANT:
+     * OPTIONS must be handled before authentication.
      */
     if (
       request.method ===
@@ -503,20 +611,17 @@ Deno.serve(
 
     /*
      * ------------------------------------------------------------
-     * METHOD
+     * METHOD VALIDATION
      * ------------------------------------------------------------
      */
+
     if (
       request.method !==
       "POST"
     ) {
-      return jsonResponse(
+      return errorResponse(
         request,
-        {
-          success: false,
-          error:
-            "Method not allowed.",
-        },
+        "Method not allowed.",
         405,
       )
     }
@@ -527,6 +632,7 @@ Deno.serve(
        * ENVIRONMENT
        * ----------------------------------------------------------
        */
+
       validateEnvironment()
 
       /*
@@ -534,6 +640,7 @@ Deno.serve(
        * AUTHENTICATION
        * ----------------------------------------------------------
        */
+
       const user =
         await authenticate(
           request,
@@ -544,6 +651,7 @@ Deno.serve(
        * AUTHORIZATION
        * ----------------------------------------------------------
        */
+
       await authorize(
         user.id,
       )
@@ -553,19 +661,16 @@ Deno.serve(
        * REQUEST BODY
        * ----------------------------------------------------------
        */
+
       let body: unknown
 
       try {
         body =
           await request.json()
       } catch {
-        return jsonResponse(
+        return errorResponse(
           request,
-          {
-            success: false,
-            error:
-              "Invalid JSON request body.",
-          },
+          "Invalid JSON request body.",
           400,
         )
       }
@@ -573,15 +678,12 @@ Deno.serve(
       if (
         !body ||
         typeof body !==
-          "object"
+          "object" ||
+        Array.isArray(body)
       ) {
-        return jsonResponse(
+        return errorResponse(
           request,
-          {
-            success: false,
-            error:
-              "Invalid request body.",
-          },
+          "Invalid request body.",
           400,
         )
       }
@@ -596,6 +698,7 @@ Deno.serve(
        * EMPLOYEE ID
        * ----------------------------------------------------------
        */
+
       const employeeId =
         typeof requestBody.employee_id ===
         "string"
@@ -603,28 +706,24 @@ Deno.serve(
           : ""
 
       if (!employeeId) {
-        return jsonResponse(
+        return errorResponse(
           request,
-          {
-            success: false,
-            error:
-              "employee_id is required.",
-          },
+          "employee_id is required.",
           400,
         )
       }
 
+      /*
+       * employees.id is a UUID.
+       */
       if (
-        employeeId.length >
-        100
+        !isValidUUID(
+          employeeId,
+        )
       ) {
-        return jsonResponse(
+        return errorResponse(
           request,
-          {
-            success: false,
-            error:
-              "Invalid employee_id.",
-          },
+          "Invalid employee_id.",
           400,
         )
       }
@@ -634,6 +733,7 @@ Deno.serve(
        * EMPLOYEE LOOKUP
        * ----------------------------------------------------------
        */
+
       const employee =
         await getEmployee(
           employeeId,
@@ -641,12 +741,13 @@ Deno.serve(
 
       /*
        * ----------------------------------------------------------
-       * NO AVATAR
+       * NO PROFILE IMAGE
        * ----------------------------------------------------------
        *
-       * This is not an error.
+       * This is a valid state.
        *
-       * The frontend can simply show initials.
+       * The frontend should display employee initials
+       * or its default avatar.
        */
       if (
         !employee.avatar_url
@@ -656,25 +757,78 @@ Deno.serve(
           {
             success: true,
             has_avatar: false,
+
             employee_id:
               employee.id,
-            avatar_url: null,
-            url: null,
-            signed_url: null,
-            expires_in: 0,
+
+            employee_code:
+              employee.employee_id,
+
+            employee_name:
+              employee.full_name,
+
+            avatar_url:
+              null,
+
+            url:
+              null,
+
+            signed_url:
+              null,
+
+            expires_in:
+              0,
           },
           200,
         )
       }
+
+      /*
+       * ----------------------------------------------------------
+       * R2 OBJECT KEY
+       * ----------------------------------------------------------
+       */
 
       const objectKey =
         String(
           employee.avatar_url,
         ).trim()
 
+      if (!objectKey) {
+        return jsonResponse(
+          request,
+          {
+            success: true,
+            has_avatar: false,
+
+            employee_id:
+              employee.id,
+
+            employee_code:
+              employee.employee_id,
+
+            employee_name:
+              employee.full_name,
+
+            avatar_url:
+              null,
+
+            url:
+              null,
+
+            signed_url:
+              null,
+
+            expires_in:
+              0,
+          },
+          200,
+        )
+      }
+
       /*
        * ----------------------------------------------------------
-       * SECURITY CHECK
+       * SECURITY VALIDATION
        * ----------------------------------------------------------
        *
        * Never allow the client to request an arbitrary
@@ -687,28 +841,35 @@ Deno.serve(
         )
       ) {
         console.error(
-          "Invalid employee avatar object key:",
-          objectKey,
+          "Rejected invalid employee avatar key:",
+          {
+            employeeId:
+              employee.id,
+            objectKey,
+          },
         )
 
-        return jsonResponse(
+        return errorResponse(
           request,
-          {
-            success: false,
-            error:
-              "The employee profile image path is invalid.",
-          },
+          "The employee profile image path is invalid.",
           400,
         )
       }
 
       /*
        * ----------------------------------------------------------
-       * R2 SIGNED URL
+       * R2 CLIENT
        * ----------------------------------------------------------
        */
+
       const r2 =
         createR2Client()
+
+      /*
+       * ----------------------------------------------------------
+       * GENERATE SIGNED URL
+       * ----------------------------------------------------------
+       */
 
       let signedUrl: string
 
@@ -720,6 +881,7 @@ Deno.serve(
               {
                 Bucket:
                   R2_BUCKET_NAME,
+
                 Key:
                   objectKey,
               },
@@ -731,7 +893,7 @@ Deno.serve(
           )
       } catch (r2Error) {
         console.error(
-          "Failed to generate employee avatar signed URL:",
+          "R2 signed URL generation failed:",
           r2Error,
         )
 
@@ -745,22 +907,39 @@ Deno.serve(
        * SUCCESS
        * ----------------------------------------------------------
        */
+
       return jsonResponse(
         request,
         {
           success: true,
+
           has_avatar: true,
+
           employee_id:
             employee.id,
+
           employee_code:
             employee.employee_id,
+
           employee_name:
             employee.full_name,
+
+          /*
+           * This remains the PRIVATE R2 object key.
+           * It is not a public URL.
+           */
           avatar_url:
             objectKey,
-          url: signedUrl,
+
+          /*
+           * Temporary signed URL used by the browser.
+           */
+          url:
+            signedUrl,
+
           signed_url:
             signedUrl,
+
           expires_in:
             SIGNED_URL_EXPIRES_IN,
         },
@@ -768,50 +947,52 @@ Deno.serve(
       )
     } catch (error) {
       console.error(
-        "r2-employee-url error:",
+        "employee-url function error:",
         error,
       )
+
+      if (
+        error instanceof
+        AuthError
+      ) {
+        return errorResponse(
+          request,
+          error.message,
+          401,
+        )
+      }
+
+      if (
+        error instanceof
+        AuthorizationError
+      ) {
+        return errorResponse(
+          request,
+          error.message,
+          403,
+        )
+      }
 
       const message =
         error instanceof Error
           ? error.message
           : "An unexpected error occurred."
 
-      let status = 500
-
-      if (
-        message.includes(
-          "authentication",
-        ) ||
-        message.includes(
-          "authentication token",
-        ) ||
-        message.includes(
-          "expired",
-        ) ||
-        message.includes(
-          "Invalid or expired",
+      /*
+       * Do not expose internal infrastructure
+       * details to the browser.
+       */
+      const safeMessage =
+        message.startsWith(
+          "Missing required environment variables:",
         )
-      ) {
-        status = 401
-      } else if (
-        message.includes(
-          "permission",
-        ) ||
-        message.includes(
-          "inactive",
-        )
-      ) {
-        status = 403
-      }
+          ? "The server is not correctly configured."
+          : message
 
-      return jsonResponse(
+      return errorResponse(
         request,
-        {
-          success: false,
-          error: message,
-        },
-        status,
+        safeMessage,
+        500,
       )
     }
   },
