@@ -1,8 +1,11 @@
+
 import {
   createContext,
   useContext,
   useEffect,
   useState,
+  useCallback,
+  useRef,
   type ReactNode,
 } from 'react'
 
@@ -12,6 +15,10 @@ import type {
 } from '@supabase/supabase-js'
 
 import { supabase } from '../lib/supabase'
+
+/* ============================================================
+   TYPES
+============================================================ */
 
 export type UserRole =
   | 'admin'
@@ -53,6 +60,7 @@ interface AuthContextType {
   user: UserProfile | null
   admin: AuthAdmin | null
   session: Session | null
+
   loading: boolean
   isLoading: boolean
   isAuthenticated: boolean
@@ -81,14 +89,45 @@ interface AuthContextType {
   }>
 }
 
+interface AuthProviderProps {
+  children: ReactNode
+}
+
+interface SessionTracking {
+  userId: string
+  startedAt: number
+  lastActivityAt: number
+}
+
 const AuthContext =
   createContext<AuthContextType | undefined>(
     undefined
   )
 
-interface AuthProviderProps {
-  children: ReactNode
-}
+/* ============================================================
+   SESSION SECURITY CONFIGURATION
+============================================================ */
+
+// Logout after 15 minutes without user activity.
+const INACTIVITY_TIMEOUT =
+  15 * 60 * 1000
+
+// Maximum login duration: 4 hours.
+const MAX_SESSION_DURATION =
+  4 * 60 * 60 * 1000
+
+// Check session validity every 10 seconds.
+const SESSION_CHECK_INTERVAL = 10 * 1000
+
+// Limit how frequently activity writes to storage.
+const ACTIVITY_WRITE_INTERVAL = 5 * 1000
+
+const SESSION_STORAGE_KEY =
+  'xyphora_prime_auth_tracking_v1'
+
+/* ============================================================
+   HELPERS
+============================================================ */
 
 function normalize(
   value: string | null | undefined
@@ -126,6 +165,162 @@ function getAuthError(
   return new Error(fallback)
 }
 
+/* ============================================================
+   SESSION STORAGE HELPERS
+============================================================ */
+
+function readSessionTracking():
+  SessionTracking | null {
+  try {
+    const raw = localStorage.getItem(
+      SESSION_STORAGE_KEY
+    )
+
+    if (!raw) {
+      return null
+    }
+
+    const parsed: unknown = JSON.parse(raw)
+
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null
+    ) {
+      return null
+    }
+
+    const record =
+      parsed as Partial<SessionTracking>
+
+    if (
+      typeof record.userId !== 'string' ||
+      typeof record.startedAt !== 'number' ||
+      typeof record.lastActivityAt !== 'number' ||
+      !Number.isFinite(record.startedAt) ||
+      !Number.isFinite(record.lastActivityAt)
+    ) {
+      return null
+    }
+
+    return {
+      userId: record.userId,
+      startedAt: record.startedAt,
+      lastActivityAt: record.lastActivityAt,
+    }
+  } catch {
+    return null
+  }
+}
+
+function saveSessionTracking(
+  tracking: SessionTracking
+): void {
+  try {
+    localStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify(tracking)
+    )
+  } catch (error) {
+    console.error(
+      'Unable to save session tracking:',
+      error
+    )
+  }
+}
+
+function clearSessionTracking(): void {
+  try {
+    localStorage.removeItem(
+      SESSION_STORAGE_KEY
+    )
+  } catch (error) {
+    console.error(
+      'Unable to clear session tracking:',
+      error
+    )
+  }
+}
+
+function getSessionStart(
+  currentSession: Session
+): number {
+  const lastSignIn =
+    currentSession.user.last_sign_in_at
+
+  if (lastSignIn) {
+    const parsed = Date.parse(lastSignIn)
+
+    if (Number.isFinite(parsed)) {
+      return parsed
+    }
+  }
+
+  // Fallback if Supabase does not provide a
+  // last-sign-in timestamp.
+  return Date.now()
+}
+
+function initializeSessionTracking(
+  currentSession: Session
+): SessionTracking {
+  const existing = readSessionTracking()
+
+  if (
+    existing &&
+    existing.userId === currentSession.user.id
+  ) {
+    return existing
+  }
+
+  // Do not treat a page reload as a new login.
+  // Use Supabase's most recent sign-in timestamp.
+  const startedAt =
+    getSessionStart(currentSession)
+
+  const tracking: SessionTracking = {
+    userId: currentSession.user.id,
+    startedAt,
+    lastActivityAt: startedAt,
+  }
+
+  saveSessionTracking(tracking)
+
+  return tracking
+}
+
+function getSessionExpiryReason(
+  tracking: SessionTracking
+): 'inactive' | 'maximum' | null {
+  const now = Date.now()
+
+  if (
+    tracking.startedAt > now ||
+    tracking.lastActivityAt > now
+  ) {
+    return 'maximum'
+  }
+
+  if (
+    now - tracking.startedAt >=
+    MAX_SESSION_DURATION
+  ) {
+    return 'maximum'
+  }
+
+  if (
+    now - tracking.lastActivityAt >=
+    INACTIVITY_TIMEOUT
+  ) {
+    return 'inactive'
+  }
+
+  return null
+}
+
+/* ============================================================
+   AUTH PROVIDER
+============================================================ */
+
 export function AuthProvider({
   children,
 }: AuthProviderProps) {
@@ -138,313 +333,333 @@ export function AuthProvider({
   const [loading, setLoading] =
     useState(true)
 
-  /*
-   * ------------------------------------------------------------
-   * LOAD PROFILE
-   * ------------------------------------------------------------
-   *
-   * Loads the application's profile row using
-   * the authenticated Supabase user ID.
-   */
-  const loadProfile = async (
-    authUser: User
-  ): Promise<UserProfile | null> => {
-    const {
-      data,
-      error,
-    } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', authUser.id)
-      .maybeSingle()
+  const sessionRef =
+    useRef<Session | null>(null)
 
-    if (error) {
-      console.error(
-        'Failed to load user profile:',
-        error
-      )
+  const signingOutRef =
+    useRef(false)
 
-      return null
-    }
+  const lastActivityWriteRef =
+    useRef(0)
 
-    if (!data) {
-      return null
-    }
+  const authRequestRef =
+    useRef(0)
 
-    return data as UserProfile
-  }
+  /* ==========================================================
+     CLEAR LOCAL AUTHENTICATION STATE
+  ========================================================== */
 
-  /*
-   * ------------------------------------------------------------
-   * REFRESH PROFILE
-   * ------------------------------------------------------------
-   */
-  const refreshProfile = async (): Promise<void> => {
-    try {
-      const {
-        data: {
-          user: authUser,
-        },
-        error,
-      } = await supabase.auth.getUser()
+  const clearAuthState =
+    useCallback(() => {
+      authRequestRef.current += 1
+      sessionRef.current = null
+      setSession(null)
+      setUser(null)
+      setLoading(false)
+    }, [])
 
-      if (error) {
-        throw error
-      }
+  /* ==========================================================
+     LOAD USER PROFILE
+  ========================================================== */
 
-      if (!authUser) {
-        setUser(null)
+  const loadProfile =
+    useCallback(
+      async (
+        authUser: User
+      ): Promise<UserProfile | null> => {
+        const {
+          data,
+          error,
+        } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', authUser.id)
+          .maybeSingle()
+
+        if (error) {
+          console.error(
+            'Failed to load user profile:',
+            error
+          )
+
+          return null
+        }
+
+        if (!data) {
+          return null
+        }
+
+        return data as UserProfile
+      },
+      []
+    )
+
+  /* ==========================================================
+     SIGN OUT
+  ========================================================== */
+
+  const signOut =
+    useCallback(
+      async (): Promise<{
+        error: Error | null
+      }> => {
+        if (signingOutRef.current) {
+          return {
+            error: null,
+          }
+        }
+
+        signingOutRef.current = true
+
+        // Immediately remove protected application state.
+        clearAuthState()
+        clearSessionTracking()
+
+        try {
+          const {
+            error,
+          } = await supabase.auth.signOut()
+
+          if (error) {
+            return {
+              error: new Error(error.message),
+            }
+          }
+
+          return {
+            error: null,
+          }
+        } catch (error) {
+          return {
+            error: getAuthError(
+              error,
+              'Unable to sign out.'
+            ),
+          }
+        } finally {
+          signingOutRef.current = false
+        }
+      },
+      [clearAuthState]
+    )
+
+  // Keep the existing logout API for compatibility.
+  const logout = signOut
+
+  /* ==========================================================
+     AUTOMATIC SESSION EXPIRATION
+  ========================================================== */
+
+  const expireSession =
+    useCallback(
+      async (
+        reason: 'inactive' | 'maximum'
+      ): Promise<void> => {
+        if (signingOutRef.current) {
+          return
+        }
+
+        console.info(
+          reason === 'inactive'
+            ? 'Session expired due to inactivity.'
+            : 'Maximum session duration reached.'
+        )
+
+        const result = await signOut()
+
+        if (result.error) {
+          console.error(
+            'Automatic logout failed:',
+            result.error
+          )
+        }
+      },
+      [signOut]
+    )
+
+  /* ==========================================================
+     VALIDATE CURRENT SESSION
+  ========================================================== */
+
+  const validateSession =
+    useCallback(
+      (
+        currentSession: Session | null
+      ): boolean => {
+        if (!currentSession) {
+          return false
+        }
+
+        if (signingOutRef.current) {
+          return false
+        }
+
+        const tracking =
+          initializeSessionTracking(
+            currentSession
+          )
+
+        const expiryReason =
+          getSessionExpiryReason(tracking)
+
+        if (expiryReason) {
+          void expireSession(expiryReason)
+
+          return false
+        }
+
+        return true
+      },
+      [expireSession]
+    )
+
+  /* ==========================================================
+     RECORD USER ACTIVITY
+  ========================================================== */
+
+  const recordActivity =
+    useCallback(() => {
+      const currentSession =
+        sessionRef.current
+
+      if (
+        !currentSession ||
+        signingOutRef.current
+      ) {
         return
       }
 
-      const profile =
-        await loadProfile(authUser)
-
-      setUser(profile)
-    } catch (error) {
-      console.error(
-        'Failed to refresh profile:',
-        error
-      )
-
-      setUser(null)
-    }
-  }
-
-  /*
-   * ------------------------------------------------------------
-   * UPDATE PROFILE
-   * ------------------------------------------------------------
-   *
-   * This is used by ProfilePage.
-   *
-   * Database:
-   *   profiles.full_name
-   *   profiles.phone
-   *   profiles.whatsapp
-   *   profiles.avatar_url
-   *
-   * Auth metadata is also synchronized so the
-   * authenticated Supabase user remains consistent.
-   */
-  const updateProfile = async (
-    updates: ProfileUpdates
-  ): Promise<{
-    error: Error | null
-  }> => {
-    try {
-      const {
-        data: {
-          user: authUser,
-        },
-        error: userError,
-      } = await supabase.auth.getUser()
-
-      if (userError) {
-        throw userError
+      // Validate before extending inactivity time.
+      // An expired session must never be revived
+      // by clicking or moving the mouse.
+      if (!validateSession(currentSession)) {
+        return
       }
 
-      if (!authUser) {
-        throw new Error(
-          'Your session has expired. Please sign in again.'
-        )
-      }
-
-      /*
-       * Build a clean database payload.
-       *
-       * Only include properties that were actually
-       * supplied by the caller.
-       */
-      const profileUpdates: {
-        full_name?: string
-        phone?: string | null
-        whatsapp?: string | null
-        avatar_url?: string | null
-      } = {}
+      const now = Date.now()
 
       if (
-        updates.full_name !== undefined
+        now - lastActivityWriteRef.current <
+        ACTIVITY_WRITE_INTERVAL
       ) {
-        const fullName =
-          normalize(
-            updates.full_name
-          )
+        return
+      }
 
-        if (!fullName) {
-          throw new Error(
-            'Full name cannot be empty.'
-          )
+      const tracking =
+        readSessionTracking()
+
+      if (
+        !tracking ||
+        tracking.userId !==
+          currentSession.user.id
+      ) {
+        return
+      }
+
+      const updated: SessionTracking = {
+        ...tracking,
+        lastActivityAt: now,
+      }
+
+      saveSessionTracking(updated)
+
+      lastActivityWriteRef.current = now
+    }, [validateSession])
+
+  /* ==========================================================
+     SYNC AUTHENTICATION SESSION
+  ========================================================== */
+
+  const syncAuthSession =
+    useCallback(
+      async (
+        currentSession: Session | null
+      ): Promise<void> => {
+        const requestId =
+          ++authRequestRef.current
+
+        if (!currentSession) {
+          clearAuthState()
+          return
         }
 
-        profileUpdates.full_name =
-          fullName
-      }
-
-      if (
-        updates.phone !== undefined
-      ) {
-        profileUpdates.phone =
-          normalize(
-            updates.phone
-          ) || null
-      }
-
-      if (
-        updates.whatsapp !== undefined
-      ) {
-        profileUpdates.whatsapp =
-          normalize(
-            updates.whatsapp
-          ) || null
-      }
-
-      if (
-        updates.avatar_url !== undefined
-      ) {
-        profileUpdates.avatar_url =
-          updates.avatar_url || null
-      }
-
-      /*
-       * Only perform a database update if
-       * there is actually something to update.
-       */
-      if (
-        Object.keys(
-          profileUpdates
-        ).length > 0
-      ) {
-        const {
-          error: profileError,
-        } = await supabase
-          .from('profiles')
-          .update(
-            profileUpdates
-          )
-          .eq(
-            'id',
-            authUser.id
-          )
-
-        if (profileError) {
-          throw profileError
+        if (
+          !validateSession(currentSession)
+        ) {
+          return
         }
-      }
 
-      /*
-       * Synchronize useful profile information
-       * with Supabase Auth metadata.
-       */
-      const metadataUpdates: {
-        full_name?: string
-        name?: string
-        phone?: string
-        whatsapp?: string
-        avatar_url?: string | null
-      } = {}
+        sessionRef.current =
+          currentSession
 
-      if (
-        updates.full_name !== undefined
-      ) {
-        const fullName =
-          normalize(
-            updates.full_name
+        setSession(currentSession)
+
+        try {
+          const profile =
+            await loadProfile(
+              currentSession.user
+            )
+
+          // Ignore results from outdated async requests.
+          if (
+            requestId !==
+            authRequestRef.current
+          ) {
+            return
+          }
+
+          if (
+            !validateSession(currentSession)
+          ) {
+            return
+          }
+
+          if (
+            !profile ||
+            profile.status !== 'Active'
+          ) {
+            console.warn(
+              'Authentication rejected: missing or inactive profile.'
+            )
+
+            await signOut()
+            return
+          }
+
+          setUser(profile)
+        } catch (error) {
+          console.error(
+            'Failed to synchronize authentication:',
+            error
           )
 
-        metadataUpdates.full_name =
-          fullName
-
-        metadataUpdates.name =
-          fullName
-      }
-
-      if (
-        updates.phone !== undefined
-      ) {
-        metadataUpdates.phone =
-          normalize(
-            updates.phone
-          )
-      }
-
-      if (
-        updates.whatsapp !== undefined
-      ) {
-        metadataUpdates.whatsapp =
-          normalize(
-            updates.whatsapp
-          )
-      }
-
-      if (
-        updates.avatar_url !== undefined
-      ) {
-        metadataUpdates.avatar_url =
-          updates.avatar_url
-      }
-
-      if (
-        Object.keys(
-          metadataUpdates
-        ).length > 0
-      ) {
-        const {
-          error: authUpdateError,
-        } =
-          await supabase.auth.updateUser(
-            {
-              data: metadataUpdates,
-            }
-          )
-
-        if (authUpdateError) {
-          throw authUpdateError
+          if (
+            requestId ===
+            authRequestRef.current
+          ) {
+            clearAuthState()
+          }
+        } finally {
+          if (
+            requestId ===
+            authRequestRef.current
+          ) {
+            setLoading(false)
+          }
         }
-      }
+      },
+      [
+        clearAuthState,
+        loadProfile,
+        signOut,
+        validateSession,
+      ]
+    )
 
-      /*
-       * Reload the actual profile from the database
-       * so local application state is guaranteed to
-       * match the stored record.
-       */
-      const updatedProfile =
-        await loadProfile(
-          authUser
-        )
+  /* ==========================================================
+     INITIALIZE AUTHENTICATION
+  ========================================================== */
 
-      if (updatedProfile) {
-        setUser(
-          updatedProfile
-        )
-      }
-
-      return {
-        error: null,
-      }
-    } catch (error) {
-      const normalizedError =
-        getAuthError(
-          error,
-          'Failed to update profile.'
-        )
-
-      console.error(
-        'Failed to update profile:',
-        normalizedError
-      )
-
-      return {
-        error: normalizedError,
-      }
-    }
-  }
-
-  /*
-   * ------------------------------------------------------------
-   * INITIALIZE AUTH
-   * ------------------------------------------------------------
-   */
   useEffect(() => {
     let mounted = true
 
@@ -453,8 +668,7 @@ export function AuthProvider({
         try {
           const {
             data: {
-              session:
-                currentSession,
+              session: currentSession,
             },
             error,
           } =
@@ -468,26 +682,9 @@ export function AuthProvider({
             return
           }
 
-          setSession(
+          await syncAuthSession(
             currentSession
           )
-
-          if (
-            currentSession?.user
-          ) {
-            const profile =
-              await loadProfile(
-                currentSession.user
-              )
-
-            if (!mounted) {
-              return
-            }
-
-            setUser(profile)
-          } else {
-            setUser(null)
-          }
         } catch (error) {
           console.error(
             'Failed to initialize authentication:',
@@ -495,8 +692,7 @@ export function AuthProvider({
           )
 
           if (mounted) {
-            setSession(null)
-            setUser(null)
+            clearAuthState()
           }
         } finally {
           if (mounted) {
@@ -507,12 +703,6 @@ export function AuthProvider({
 
     void initializeAuth()
 
-    /*
-     * Supabase auth events can fire while the
-     * application is rendering. Defer the profile
-     * request so we do not perform another Supabase
-     * operation directly inside the auth callback.
-     */
     const {
       data: {
         subscription,
@@ -524,37 +714,17 @@ export function AuthProvider({
             return
           }
 
-          setSession(
-            currentSession
-          )
+          // Do not perform additional Supabase
+          // requests synchronously inside this callback.
+          window.setTimeout(() => {
+            if (!mounted) {
+              return
+            }
 
-          if (!currentSession) {
-            setUser(null)
-            setLoading(false)
-            return
-          }
-
-          window.setTimeout(
-            () => {
-              if (!mounted) {
-                return
-              }
-
-              void loadProfile(
-                currentSession.user
-              ).then(
-                (profile) => {
-                  if (!mounted) {
-                    return
-                  }
-
-                  setUser(profile)
-                  setLoading(false)
-                }
-              )
-            },
-            0
-          )
+            void syncAuthSession(
+              currentSession
+            )
+          }, 0)
         }
       )
 
@@ -562,233 +732,621 @@ export function AuthProvider({
       mounted = false
       subscription.unsubscribe()
     }
-  }, [])
+  }, [
+    clearAuthState,
+    syncAuthSession,
+  ])
 
-  /*
-   * ------------------------------------------------------------
-   * SIGN IN
-   * ------------------------------------------------------------
-   */
-  const signIn = async (
-    email: string,
-    password: string
-  ): Promise<{
-    error: Error | null
-  }> => {
-    const cleanEmail =
-      normalize(email)
+  /* ==========================================================
+     INACTIVITY AND SESSION MONITORING
+  ========================================================== */
 
-    if (!cleanEmail) {
-      return {
-        error: new Error(
-          'Please enter your email address.'
-        ),
+  useEffect(() => {
+    const checkSession = () => {
+      const currentSession =
+        sessionRef.current
+
+      if (!currentSession) {
+        return
       }
+
+      validateSession(currentSession)
     }
 
-    if (!password) {
-      return {
-        error: new Error(
-          'Please enter your password.'
-        ),
-      }
-    }
+    const activityEvents = [
+      'pointerdown',
+      'keydown',
+      'touchstart',
+      'scroll',
+    ] as const
 
-    try {
-      const {
-        data,
-        error,
-      } =
-        await supabase.auth.signInWithPassword(
-          {
-            email: cleanEmail,
-            password,
-          }
-        )
+    activityEvents.forEach((eventName) => {
+      window.addEventListener(
+        eventName,
+        recordActivity,
+        { passive: true }
+      )
+    })
 
-      if (error) {
-        return {
-          error: new Error(
-            error.message
-          ),
-        }
-      }
-
-      if (!data.user) {
-        return {
-          error: new Error(
-            'Authentication failed. No user was returned.'
-          ),
-        }
-      }
-
-      const profile =
-        await loadProfile(
-          data.user
-        )
-
-      if (!profile) {
-        await supabase.auth.signOut()
-
-        return {
-          error: new Error(
-            'Your account profile could not be found.'
-          ),
-        }
-      }
-
+    const handleVisibilityChange = () => {
       if (
-        profile.status !==
-        'Active'
+        document.visibilityState ===
+        'visible'
       ) {
-        await supabase.auth.signOut()
+        checkSession()
+      }
+    }
 
-        return {
-          error: new Error(
-            'Your account is currently inactive.'
-          ),
-        }
+    const handleFocus = () => {
+      checkSession()
+    }
+
+    const handleStorageChange = (
+      event: StorageEvent
+    ) => {
+      if (
+        event.key !==
+        SESSION_STORAGE_KEY
+      ) {
+        return
       }
 
-      const loginTime =
-        new Date().toISOString()
+      const currentSession =
+        sessionRef.current
 
-      /*
-       * Update last login timestamp.
-       */
-      const {
-        error:
-          lastLoginError,
-      } =
-        await supabase
-          .from('profiles')
-          .update({
-            last_login_at:
-              loginTime,
-          })
-          .eq(
-            'id',
-            data.user.id
+      if (!currentSession) {
+        return
+      }
+
+      if (!event.newValue) {
+        // Another tab removed the tracking record.
+        // The user has logged out elsewhere.
+        void signOut()
+        return
+      }
+
+      checkSession()
+    }
+
+    document.addEventListener(
+      'visibilitychange',
+      handleVisibilityChange
+    )
+
+    window.addEventListener(
+      'focus',
+      handleFocus
+    )
+
+    window.addEventListener(
+      'storage',
+      handleStorageChange
+    )
+
+    const interval =
+      window.setInterval(
+        checkSession,
+        SESSION_CHECK_INTERVAL
+      )
+
+    // Validate immediately when monitoring starts.
+    checkSession()
+
+    return () => {
+      activityEvents.forEach((eventName) => {
+        window.removeEventListener(
+          eventName,
+          recordActivity
+        )
+      })
+
+      document.removeEventListener(
+        'visibilitychange',
+        handleVisibilityChange
+      )
+
+      window.removeEventListener(
+        'focus',
+        handleFocus
+      )
+
+      window.removeEventListener(
+        'storage',
+        handleStorageChange
+      )
+
+      window.clearInterval(interval)
+    }
+  }, [
+    recordActivity,
+    signOut,
+    validateSession,
+  ])
+
+  /* ==========================================================
+     REFRESH PROFILE
+  ========================================================== */
+
+  const refreshProfile =
+    useCallback(
+      async (): Promise<void> => {
+        try {
+          const currentSession =
+            sessionRef.current
+
+          if (
+            !currentSession ||
+            !validateSession(currentSession)
+          ) {
+            setUser(null)
+            return
+          }
+
+          const {
+            data: {
+              user: authUser,
+            },
+            error,
+          } =
+            await supabase.auth.getUser()
+
+          if (error) {
+            throw error
+          }
+
+          if (!authUser) {
+            await signOut()
+            return
+          }
+
+          const profile =
+            await loadProfile(authUser)
+
+          if (
+            !validateSession(
+              sessionRef.current
+            )
+          ) {
+            return
+          }
+
+          if (
+            !profile ||
+            profile.status !== 'Active'
+          ) {
+            await signOut()
+            return
+          }
+
+          setUser(profile)
+        } catch (error) {
+          console.error(
+            'Failed to refresh profile:',
+            error
           )
 
-      if (lastLoginError) {
-        console.error(
-          'Failed to update last login time:',
-          lastLoginError
-        )
+          setUser(null)
+        }
+      },
+      [
+        loadProfile,
+        signOut,
+        validateSession,
+      ]
+    )
 
-        /*
-         * This should not prevent an otherwise
-         * successful authentication.
-         */
-      }
+  /* ==========================================================
+     UPDATE PROFILE
+  ========================================================== */
 
-      const updatedProfile: UserProfile =
-        {
-          ...profile,
-          last_login_at:
-            loginTime,
+  const updateProfile =
+    useCallback(
+      async (
+        updates: ProfileUpdates
+      ): Promise<{
+        error: Error | null
+      }> => {
+        try {
+          const currentSession =
+            sessionRef.current
+
+          if (
+            !currentSession ||
+            !validateSession(currentSession)
+          ) {
+            throw new Error(
+              'Your session has expired. Please sign in again.'
+            )
+          }
+
+          const {
+            data: {
+              user: authUser,
+            },
+            error: userError,
+          } =
+            await supabase.auth.getUser()
+
+          if (userError) {
+            throw userError
+          }
+
+          if (!authUser) {
+            throw new Error(
+              'Your session has expired. Please sign in again.'
+            )
+          }
+
+          const profileUpdates: {
+            full_name?: string
+            phone?: string | null
+            whatsapp?: string | null
+            avatar_url?: string | null
+          } = {}
+
+          if (
+            updates.full_name !== undefined
+          ) {
+            const fullName =
+              normalize(
+                updates.full_name
+              )
+
+            if (!fullName) {
+              throw new Error(
+                'Full name cannot be empty.'
+              )
+            }
+
+            profileUpdates.full_name =
+              fullName
+          }
+
+          if (
+            updates.phone !== undefined
+          ) {
+            profileUpdates.phone =
+              normalize(
+                updates.phone
+              ) || null
+          }
+
+          if (
+            updates.whatsapp !== undefined
+          ) {
+            profileUpdates.whatsapp =
+              normalize(
+                updates.whatsapp
+              ) || null
+          }
+
+          if (
+            updates.avatar_url !== undefined
+          ) {
+            profileUpdates.avatar_url =
+              updates.avatar_url || null
+          }
+
+          if (
+            Object.keys(
+              profileUpdates
+            ).length > 0
+          ) {
+            const {
+              error: profileError,
+            } = await supabase
+              .from('profiles')
+              .update(profileUpdates)
+              .eq('id', authUser.id)
+
+            if (profileError) {
+              throw profileError
+            }
+          }
+
+          // Keep Supabase Auth metadata synchronized.
+          const metadataUpdates: {
+            full_name?: string
+            name?: string
+            phone?: string
+            whatsapp?: string
+            avatar_url?: string | null
+          } = {}
+
+          if (
+            updates.full_name !== undefined
+          ) {
+            const fullName =
+              normalize(
+                updates.full_name
+              )
+
+            metadataUpdates.full_name =
+              fullName
+
+            metadataUpdates.name =
+              fullName
+          }
+
+          if (
+            updates.phone !== undefined
+          ) {
+            metadataUpdates.phone =
+              normalize(
+                updates.phone
+              )
+          }
+
+          if (
+            updates.whatsapp !== undefined
+          ) {
+            metadataUpdates.whatsapp =
+              normalize(
+                updates.whatsapp
+              )
+          }
+
+          if (
+            updates.avatar_url !== undefined
+          ) {
+            metadataUpdates.avatar_url =
+              updates.avatar_url
+          }
+
+          if (
+            Object.keys(
+              metadataUpdates
+            ).length > 0
+          ) {
+            const {
+              error: authUpdateError,
+            } =
+              await supabase.auth.updateUser({
+                data: metadataUpdates,
+              })
+
+            if (authUpdateError) {
+              throw authUpdateError
+            }
+          }
+
+          const updatedProfile =
+            await loadProfile(authUser)
+
+          if (
+            !validateSession(
+              sessionRef.current
+            )
+          ) {
+            throw new Error(
+              'Your session has expired. Please sign in again.'
+            )
+          }
+
+          if (
+            updatedProfile &&
+            updatedProfile.status === 'Active'
+          ) {
+            setUser(updatedProfile)
+          }
+
+          return {
+            error: null,
+          }
+        } catch (error) {
+          const normalizedError =
+            getAuthError(
+              error,
+              'Failed to update profile.'
+            )
+
+          console.error(
+            'Failed to update profile:',
+            normalizedError
+          )
+
+          return {
+            error: normalizedError,
+          }
+        }
+      },
+      [
+        loadProfile,
+        validateSession,
+      ]
+    )
+
+  /* ==========================================================
+     SIGN IN
+  ========================================================== */
+
+  const signIn =
+    useCallback(
+      async (
+        email: string,
+        password: string
+      ): Promise<{
+        error: Error | null
+      }> => {
+        const cleanEmail =
+          normalize(email)
+
+        if (!cleanEmail) {
+          return {
+            error: new Error(
+              'Please enter your email address.'
+            ),
+          }
         }
 
-      setSession(
-        data.session
-      )
-
-      setUser(
-        updatedProfile
-      )
-
-      return {
-        error: null,
-      }
-    } catch (error) {
-      return {
-        error: getAuthError(
-          error,
-          'Unable to sign in.'
-        ),
-      }
-    }
-  }
-
-  /*
-   * ------------------------------------------------------------
-   * SIGN OUT
-   * ------------------------------------------------------------
-   */
-  const signOut = async (): Promise<{
-    error: Error | null
-  }> => {
-    try {
-      const {
-        error,
-      } =
-        await supabase.auth.signOut()
-
-      if (error) {
-        return {
-          error: new Error(
-            error.message
-          ),
+        if (!password) {
+          return {
+            error: new Error(
+              'Please enter your password.'
+            ),
+          }
         }
-      }
 
-      setUser(null)
-      setSession(null)
+        setLoading(true)
 
-      return {
-        error: null,
-      }
-    } catch (error) {
-      return {
-        error: getAuthError(
-          error,
-          'Unable to sign out.'
-        ),
-      }
-    }
-  }
+        try {
+          const {
+            data,
+            error,
+          } =
+            await supabase.auth.signInWithPassword({
+              email: cleanEmail,
+              password,
+            })
 
-  /*
-   * Keep logout as an alias for compatibility
-   * with existing pages/components.
-   */
-  const logout = signOut
+          if (error) {
+            setLoading(false)
 
-  /*
-   * ------------------------------------------------------------
-   * ADMIN OBJECT
-   * ------------------------------------------------------------
-   */
+            return {
+              error: new Error(
+                error.message
+              ),
+            }
+          }
+
+          if (
+            !data.user ||
+            !data.session
+          ) {
+            setLoading(false)
+
+            return {
+              error: new Error(
+                'Authentication failed. No session was returned.'
+              ),
+            }
+          }
+
+          const profile =
+            await loadProfile(
+              data.user
+            )
+
+          if (!profile) {
+            await signOut()
+
+            return {
+              error: new Error(
+                'Your account profile could not be found.'
+              ),
+            }
+          }
+
+          if (
+            profile.status !== 'Active'
+          ) {
+            await signOut()
+
+            return {
+              error: new Error(
+                'Your account is currently inactive.'
+              ),
+            }
+          }
+
+          // New login: start a fresh 4-hour session.
+          const now = Date.now()
+
+          saveSessionTracking({
+            userId: data.user.id,
+            startedAt: now,
+            lastActivityAt: now,
+          })
+
+          lastActivityWriteRef.current = now
+
+          const loginTime =
+            new Date(now).toISOString()
+
+          // Update last login in profiles.
+          const {
+            error: lastLoginError,
+          } = await supabase
+            .from('profiles')
+            .update({
+              last_login_at: loginTime,
+            })
+            .eq('id', data.user.id)
+
+          if (lastLoginError) {
+            console.error(
+              'Failed to update last login time:',
+              lastLoginError
+            )
+          }
+
+          const updatedProfile: UserProfile = {
+            ...profile,
+            last_login_at: loginTime,
+          }
+
+          sessionRef.current =
+            data.session
+
+          setSession(data.session)
+          setUser(updatedProfile)
+          setLoading(false)
+
+          return {
+            error: null,
+          }
+        } catch (error) {
+          setLoading(false)
+
+          return {
+            error: getAuthError(
+              error,
+              'Unable to sign in.'
+            ),
+          }
+        }
+      },
+      [
+        loadProfile,
+        signOut,
+      ]
+    )
+
+  /* ==========================================================
+     ADMIN OBJECT
+  ========================================================== */
+
   const admin: AuthAdmin | null =
     user
       ? {
           id: user.id,
-
           name:
             user.full_name ||
-            user.email.split(
-              '@'
-            )[0],
-
+            user.email.split('@')[0],
           email: user.email,
-
           role: user.role,
-
           last_login:
             user.last_login_at,
-
           last_login_at:
             user.last_login_at,
         }
       : null
 
+  /* ==========================================================
+     AUTHENTICATION STATUS
+  ========================================================== */
+
   const isAuthenticated =
     !loading &&
     !!session &&
-    !!user
+    !!user &&
+    user.status === 'Active'
 
   const isLoading = loading
+
+  /* ==========================================================
+     PROVIDER
+  ========================================================== */
 
   return (
     <AuthContext.Provider
@@ -811,11 +1369,13 @@ export function AuthProvider({
   )
 }
 
+/* ============================================================
+   AUTH HOOK
+============================================================ */
+
 export function useAuth() {
   const context =
-    useContext(
-      AuthContext
-    )
+    useContext(AuthContext)
 
   if (!context) {
     throw new Error(
