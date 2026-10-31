@@ -517,7 +517,9 @@ const mapSalary = (
   id: row.id,
   employee_id:
     row.employee_id,
-  month: row.month,
+  month: typeof row.month === 'string'
+  ? row.month.slice(0, 7)
+  : row.month,
   base_amount: Number(
     row.base_amount ?? 0
   ),
@@ -3354,7 +3356,9 @@ export function DataProvider({
             id: createUUID(),
             employee_id:
               s.employee_id,
-            month: s.month,
+            month: /^\d{4}-\d{2}$/.test(s.month)
+  ? `${s.month}-01`
+  : s.month,
             base_amount:
               s.base_amount,
             allowances:
@@ -3425,7 +3429,11 @@ export function DataProvider({
           .update({
             employee_id:
               s.employee_id,
-            month: s.month,
+            month: s.month
+  ? /^\d{4}-\d{2}$/.test(s.month)
+    ? `${s.month}-01`
+    : s.month
+  : undefined,
             base_amount:
               s.base_amount,
             allowances:
