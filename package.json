@@ -1,8 +1,10 @@
+
 {
-  "name": "xyphora Prime Management",
+  "name": "xyphora-prime-management",
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "npm@10.9.2",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
