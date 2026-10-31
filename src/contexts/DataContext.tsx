@@ -3368,8 +3368,6 @@ export function DataProvider({
               s.deductions,
             other_adjustments:
               s.other_adjustments,
-            net_salary:
-              s.net_salary,
             payment_date:
               s.payment_date,
             payment_method:
@@ -3441,8 +3439,6 @@ export function DataProvider({
               s.deductions,
             other_adjustments:
               s.other_adjustments,
-            net_salary:
-              s.net_salary,
             payment_date:
               s.payment_date,
             payment_method:
